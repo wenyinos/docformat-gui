@@ -980,7 +980,7 @@ def set_font(run, font_cn, font_en, size, bold=False, revision_mode=False):
         _add_rpr_change(run, orig_rpr)
 
 
-def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=False, revision_mode=False):
+def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=False, revision_mode=False, bold_serial=True):
     """格式化段落
     
     fmt 支持的字段:
@@ -1053,9 +1053,19 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
             for run in para.runs:
                 set_font(run, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False), revision_mode=revision_mode)
     else:
-        # 正文里的“一是/二是...”加粗前缀
-        if para_type == 'body':
-            m = re.match(r'^([一二三四五六七八九十]{1,3}是)([：:、]?)', para.text)
+        # 正文里的序列词加粗前缀
+        if bold_serial and para_type == 'body':
+            _SERIAL_PATTERNS = [
+                r'^([一二三四五六七八九十]{1,3}是)([：:、]?)',       # 一是、二是
+                r'^([一二三四五六七八九十]{1,3}要)([：:、]?)',       # 一要、二要
+                r'^(第[一二三四五六七八九十百\d]+[点条项步])([：:、，,]?)',  # 第一点、第二条
+                r'^([一二三四五六七八九十]{1,3}方面)([：:、]?)',     # 一方面、二方面
+            ]
+            m = None
+            for _pat in _SERIAL_PATTERNS:
+                m = re.match(_pat, para.text)
+                if m:
+                    break
             if m:
                 lead = m.group(1) + (m.group(2) or '')
                 rest = para.text[len(lead):]
@@ -1151,7 +1161,7 @@ def add_page_number(doc, font_name="宋体"):
         _build_footer_line(even_footer, WD_ALIGN_PARAGRAPH.LEFT, pad_fullwidth=False)
 
 
-def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False):
+def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False, bold_serial=True):
     """格式化文档
     
     Args:
@@ -1180,6 +1190,7 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     
     # 获取首句加粗选项
     first_line_bold = preset.get('first_line_bold', False)
+    bold_serial = preset.get('bold_serial', True)
     
     doc = Document(input_path)
 
@@ -1252,7 +1263,8 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         format_paragraph(
             para, fmt, para_type,
             first_line_bold=first_line_bold,
-            revision_mode=revision_mode
+            revision_mode=revision_mode,
+            bold_serial=bold_serial
         )
         stats[para_type] = stats.get(para_type, 0) + 1
         

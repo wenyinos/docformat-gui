@@ -19,6 +19,13 @@ from scripts.analyzer import analyze_punctuation, analyze_numbering, analyze_par
 from scripts.punctuation import process_document as fix_punctuation
 from scripts.formatter import format_document, PRESETS
 
+# 拖拽支持（可选，没有安装时自动降级）
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _DND_AVAILABLE = True
+except ImportError:
+    _DND_AVAILABLE = False
+
 
 # ===== 设计系统 =====
 class Theme:
@@ -196,6 +203,7 @@ DEFAULT_CUSTOM_SETTINGS = {
     },
     'space_handling': 'remove_all',
     'first_line_bold': False,
+    'bold_serial': True,
     'page_number': True,
     'page_number_font': '宋体',
 }
@@ -541,6 +549,16 @@ class CustomSettingsDialog(tk.Toplevel):
             activebackground=Theme.BG, selectcolor=Theme.CARD,
             padx=6, pady=3
         ).pack(anchor='w')
+
+        self.bold_serial_var = tk.BooleanVar(value=self.settings.get('bold_serial', True))
+        tk.Checkbutton(
+            special_frame,
+            text="「一是/一要/第一条」等序列词自动加粗",
+            variable=self.bold_serial_var,
+            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
+            activebackground=Theme.BG, selectcolor=Theme.CARD,
+            padx=6, pady=3
+        ).pack(anchor='w')
         
         self.page_number_var = tk.BooleanVar(value=self.settings.get('page_number', True))
         tk.Checkbutton(
@@ -875,6 +893,7 @@ class CustomSettingsDialog(tk.Toplevel):
             
             # 特殊选项
             self.first_bold_var.set(s.get('first_line_bold', False))
+            self.bold_serial_var.set(s.get('bold_serial', True))
             self.space_handling_var.set(s.get('space_handling', 'remove_all'))
             self.page_number_var.set(s.get('page_number', True))
             self.page_number_font_var.set(s.get('page_number_font', '宋体'))
@@ -998,6 +1017,7 @@ class CustomSettingsDialog(tk.Toplevel):
                 },
                 'space_handling': self.space_handling_var.get(),
                 'first_line_bold': self.first_bold_var.get(),
+                'bold_serial': self.bold_serial_var.get(),
                 'page_number': self.page_number_var.get(),
                 'page_number_font': self.page_number_font_var.get()
             }
@@ -1206,10 +1226,93 @@ class FileInputField(tk.Frame):
         
         # 监听变量
         self.variable.trace_add('write', self._update_display)
+        
+        # 拖拽支持
+        if _DND_AVAILABLE:
+            self._enable_drag_drop()
     
     def _on_click(self, event=None):
         if self.command:
             self.command()
+    
+    def _enable_drag_drop(self):
+        """启用拖拽文件支持 - 注册在根窗口上以绕过 canvas 事件截获"""
+        # 找到根窗口
+        root = self.winfo_toplevel()
+        # 避免重复注册
+        if not getattr(root, '_dnd_registered', False):
+            root.drop_target_register(DND_FILES)
+            root.dnd_bind('<<Drop>>', self._dispatch_drop)
+            root._dnd_registered = True
+            root._dnd_fields = []
+        # 把自己注册到字段列表
+        if not hasattr(root, '_dnd_fields'):
+            root._dnd_fields = []
+        root._dnd_fields.append(self)
+    
+    def _on_drag_enter(self, event):
+        """拖拽进入时高亮边框"""
+        self.container.configure(highlightbackground=Theme.PRIMARY)
+    
+    def _on_drag_leave(self, event):
+        """拖拽离开时恢复边框"""
+        self.container.configure(highlightbackground=Theme.BORDER)
+    
+    def _dispatch_drop(self, event):
+        """
+        根据鼠标坐标判断文件落在哪个 FileInputField，然后分发给对应字段处理。
+        绑定在根窗口上，避免 canvas create_window 截获事件。
+        """
+        root = self.winfo_toplevel()
+        fields = getattr(root, '_dnd_fields', [])
+        for field in fields:
+            try:
+                x = field.container.winfo_rootx()
+                y = field.container.winfo_rooty()
+                w = field.container.winfo_width()
+                h = field.container.winfo_height()
+                if x <= event.x_root <= x + w and y <= event.y_root <= y + h:
+                    # 高亮然后处理
+                    field.container.configure(highlightbackground=Theme.PRIMARY)
+                    field.after(300, lambda f=field: f.container.configure(
+                        highlightbackground=Theme.BORDER))
+                    field._on_drop(event)
+                    return
+            except Exception:
+                continue
+    
+    def _on_drop(self, event):
+        """处理拖拽放下的文件"""
+        self.container.configure(highlightbackground=Theme.BORDER)
+        # tkinterdnd2 返回的路径可能带花括号（多文件或路径含空格时）
+        raw = event.data.strip()
+        # 解析路径列表
+        if raw.startswith('{'):
+            # 多文件或含空格路径：{path1} {path2}
+            import re as _re
+            paths = _re.findall(r'\{([^}]+)\}', raw)
+            if not paths:
+                paths = [raw.strip('{}')]
+        else:
+            paths = raw.split()
+        
+        if not paths:
+            return
+        
+        # 只取第一个文件路径（输入框单文件模式）
+        path = paths[0].strip()
+        if path:
+            self.variable.set(path)
+            # 通知父级 App 执行文件选定后的完整逻辑
+            # 通过调用绑定的 command（即 browse_input 对应的 _on_file_selected）
+            # 这里直接触发 variable 的 trace 已经更新了显示
+            # 额外找到根窗口的 app 实例触发完整逻辑
+            widget = self.container
+            while widget.master:
+                widget = widget.master
+                if hasattr(widget, '_on_file_selected'):
+                    widget._on_file_selected(path)
+                    break
     
     def _update_display(self, *args):
         path = self.variable.get()
@@ -1644,6 +1747,7 @@ class DocFormatApp:
         self.preset_cards = []
         
         self.create_widgets()
+        self.root._on_file_selected = self._on_file_selected
     
     def create_widgets(self):
         """构建界面"""
@@ -2079,6 +2183,19 @@ class DocFormatApp:
         
         CustomSettingsDialog(self.root, on_save=on_save)
     
+    def _on_file_selected(self, filename):
+        """文件选定后的统一处理（点击选择和拖拽共用）"""
+        if not filename:
+            return
+        self.input_files.clear()
+        self.input_files.append(filename)
+        self.input_file.set(filename)
+        p = Path(filename)
+        output_name = f"{p.stem}_processed{p.suffix}"
+        self.output_file.set(str(p.parent / output_name))
+        self.log_panel.log(f"已选择: {p.name}", 'info')
+        self.result_panel.reset()
+    
     def browse_input(self):
         is_windows = (os.name == 'nt')
         if is_windows:
@@ -2109,9 +2226,8 @@ class DocFormatApp:
         first = Path(filenames[0])
 
         if len(filenames) == 1:
-            self.input_file.set(str(filenames[0]))
-            self.output_file.set(str(first.parent / f"{first.stem}_processed{first.suffix}"))
-            self.log_panel.log(f"已选择: {first.name}", 'info')
+            self._on_file_selected(str(filenames[0]))
+            self.log_panel.log(f"输出格式已自动设置为: {Path(filenames[0]).suffix or '.docx'}", 'info')
         else:
             # 多文件：手动更新显示，输出设为第一个文件的目录
             self.input_file.set(str(filenames[0]))
@@ -2500,8 +2616,16 @@ class DocFormatApp:
         
         try:
             cb = progress_callback if progress_callback is not None else self._update_progress
+            bold_serial = True
+            if preset_name == 'custom':
+                try:
+                    _cs = load_custom_settings()
+                    bold_serial = _cs.get('bold_serial', True)
+                except Exception:
+                    pass
             format_document(input_path, output_path, preset_name,
-                           progress_callback=cb, revision_mode=revision_mode)
+                           progress_callback=cb, revision_mode=revision_mode,
+                           bold_serial=bold_serial)
         finally:
             formatter_logger.removeHandler(handler)
         
@@ -2523,7 +2647,10 @@ def main():
     except:
         pass
     
-    root = tk.Tk()
+    if _DND_AVAILABLE:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     app = DocFormatApp(root)
     root.mainloop()
 
