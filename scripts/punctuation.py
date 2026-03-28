@@ -253,7 +253,52 @@ def _redistribute_text_to_runs(runs, new_full_text):
             run.text = ""
 
 
-def process_paragraph(para):
+def _process_spaces_text(text, mode):
+    """根据 mode 处理文本中的空格，返回处理后的文本"""
+    if mode == 'keep_all' or not text:
+        return text
+    if mode == 'remove_all':
+        # 删除所有半角空格和全角空格
+        return text.replace('\u3000', '').replace(' ', '')
+    if mode == 'keep_en_boundary':
+        CN = r'\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+        EN = r'[A-Za-z0-9]'
+        CN_cls = f'[{CN}]'
+
+        # 第一步：删除纯中文之间的空格（不涉及英文/数字边界）
+        text = re.sub(f'(?<={CN_cls}) +(?={CN_cls})', '', text)
+
+        # 第二步：将中文与英文/数字边界处的空格（0个或多个）统一替换为恰好1个
+        # 中文 → 英文/数字
+        text = re.sub(f'(?<={CN_cls}) *(?={EN})', ' ', text)
+        # 英文/数字 → 中文
+        text = re.sub(f'(?<={EN}) *(?={CN_cls})', ' ', text)
+
+        # 第三步：修正因第二步可能在段落首尾产生的多余前导/尾随空格
+        # 段落开头的英文/数字不应有前导空格
+        text = re.sub(r'^ +', '', text)
+        # 段落结尾的英文/数字不应有尾随空格
+        text = re.sub(r' +$', '', text)
+
+        return text
+    return text
+
+
+def process_spaces(para, mode='remove_all'):
+    """处理段落内空格，返回 True 表示有改动"""
+    if mode == 'keep_all':
+        return False
+    full_text = para.text
+    if not full_text.strip():
+        return False
+    new_text = _process_spaces_text(full_text, mode)
+    if new_text == full_text:
+        return False
+    _redistribute_text_to_runs(para.runs, new_text)
+    return True
+
+
+def process_paragraph(para, space_mode='remove_all'):
     """处理段落 - 简单替换按 run 做（保留格式），引号配对跨 run 做"""
     full_text = para.text
     if not full_text.strip():
@@ -279,6 +324,10 @@ def process_paragraph(para):
 
     if full_after_quotes != full_after_simple:
         _redistribute_text_to_runs(runs, full_after_quotes)
+        changed = True
+
+    # 空格处理
+    if process_spaces(para, space_mode):
         changed = True
 
     return changed

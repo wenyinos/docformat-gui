@@ -25,6 +25,8 @@ import sys
 import json
 import re
 import logging
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Cm, Twips, RGBColor
@@ -682,7 +684,7 @@ def _set_cell_borders(cell, size_pt=0.5, color="000000"):
         borders.append(elem)
 
 
-def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=None):
+def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=None, prev_para_type=None):
     """
     检测段落类型
     返回: 'title', 'recipient', 'heading1', 'heading2', 'heading3', 'heading4', 
@@ -698,6 +700,32 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
     text = text.strip()
     if not text:
         return 'empty'
+
+    closing_patterns = [
+        r'^特此(说明|通知|报告|函复|函告|批复|公告|通报)。?$',
+        r'^此致$',
+        r'^敬礼[！!]?$',
+        r'^以上(报告|意见|方案).{0,10}$',
+        r'^妥否.{0,10}$',
+        r'^请.{0,15}(批示|审批|审议|指示|核准)。?$',
+    ]
+    date_patterns = [
+        r'^\d{4}年\d{1,2}月\d{1,2}日$',
+        r'^\d{4}\.\d{1,2}\.\d{1,2}$',
+        r'^\d{4}/\d{1,2}/\d{1,2}$',
+        r'^\d{4}-\d{1,2}-\d{1,2}$',
+        r'^二[○〇零oO0][一二三四五六七八九零〇○oO0]{2}年.{1,3}月.{1,3}日$',
+    ]
+
+    # ===== 标题续行检测 =====
+    if prev_para_type == 'title':
+        heading_prefix = re.match(r'^[一二三四五六七八九十（\(\d]', text)
+        is_recipient_end = re.search(r'[：:]\s*$', text)
+        is_attachment = re.match(r'^附件', text)
+        is_closing = any(re.match(pattern, text) for pattern in closing_patterns)
+        is_date = any(re.match(pattern, text) for pattern in date_patterns)
+        if not heading_prefix and not is_recipient_end and not is_attachment and not is_closing and not is_date and len(text) < 50:
+            return 'title'
     
     # ===== 一级标题："一、" "二、" 等 =====
     if re.match(r'^[一二三四五六七八九十]+、', text):
@@ -741,27 +769,12 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
         return 'attachment'
     
     # ===== 结束语 =====
-    closing_patterns = [
-        r'^特此(说明|通知|报告|函复|函告|批复|公告|通报)。?$',
-        r'^此致$',
-        r'^敬礼[！!]?$',
-        r'^以上(报告|意见|方案).{0,10}$',
-        r'^妥否.{0,10}$',
-        r'^请.{0,15}(批示|审批|审议|指示|核准)。?$',
-    ]
     for pattern in closing_patterns:
         if re.match(pattern, text):
             return 'closing'
     
     # ===== 落款日期 =====
     # 支持多种日期格式
-    date_patterns = [
-        r'^\d{4}年\d{1,2}月\d{1,2}日$',
-        r'^\d{4}\.\d{1,2}\.\d{1,2}$',
-        r'^\d{4}/\d{1,2}/\d{1,2}$',
-        r'^\d{4}-\d{1,2}-\d{1,2}$',
-        r'^二[○〇零oO0][一二三四五六七八九零〇○oO0]{2}年.{1,3}月.{1,3}日$',
-    ]
     for pattern in date_patterns:
         if re.match(pattern, text):
             return 'date'
@@ -859,10 +872,75 @@ def _split_heading_by_punct(paragraph):
     return new_para is not None
 
 
-def set_font(run, font_cn, font_en, size, bold=False):
+# ===== 修订标记辅助 =====
+_revision_counter = [0]   # 列表以便嵌套函数修改
+
+
+def _next_rev_id():
+    _revision_counter[0] += 1
+    return _revision_counter[0]
+
+
+def _rev_date():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _add_ppr_change(para, orig_ppr):
+    """将原始段落格式嵌入 <w:pPrChange>，记录改动前状态"""
+    pPr = para._p.get_or_add_pPr()
+    # 移除已有的 pPrChange，避免重复
+    for old in pPr.findall(qn('w:pPrChange')):
+        pPr.remove(old)
+
+    change = OxmlElement('w:pPrChange')
+    change.set(qn('w:id'),     str(_next_rev_id()))
+    change.set(qn('w:author'), '公文格式工具')
+    change.set(qn('w:date'),   _rev_date())
+
+    if orig_ppr is not None:
+        snapshot = deepcopy(orig_ppr)
+        # 清除快照自身的 pPrChange，防止嵌套
+        for old in snapshot.findall(qn('w:pPrChange')):
+            snapshot.remove(old)
+        change.append(snapshot)
+    else:
+        change.append(OxmlElement('w:pPr'))
+
+    pPr.append(change)
+
+
+def _add_rpr_change(run, orig_rpr):
+    """将原始字符格式嵌入 <w:rPrChange>，记录改动前状态"""
+    rPr = run._r.get_or_add_rPr()
+    for old in rPr.findall(qn('w:rPrChange')):
+        rPr.remove(old)
+
+    change = OxmlElement('w:rPrChange')
+    change.set(qn('w:id'),     str(_next_rev_id()))
+    change.set(qn('w:author'), '公文格式工具')
+    change.set(qn('w:date'),   _rev_date())
+
+    if orig_rpr is not None:
+        snapshot = deepcopy(orig_rpr)
+        for old in snapshot.findall(qn('w:rPrChange')):
+            snapshot.remove(old)
+        change.append(snapshot)
+    else:
+        change.append(OxmlElement('w:rPr'))
+
+    rPr.append(change)
+# ===== 修订标记辅助结束 =====
+
+
+def set_font(run, font_cn, font_en, size, bold=False, revision_mode=False):
     """
     设置字体，同时清除原有格式（斜体、下划线、颜色）
     """
+    # 修订模式：记录改动前的 rPr
+    if revision_mode:
+        orig_rpr = deepcopy(run._r.rPr)
+        orig_xml = run._r.xml
+
     # 基本字体设置
     run.font.name = font_en
     run.font.size = Pt(size)
@@ -897,8 +975,12 @@ def set_font(run, font_cn, font_en, size, bold=False):
     rFonts.set(qn('w:hAnsi'), font_en)
     rFonts.set(qn('w:cs'), font_en)
 
+    # 修订模式：若有改动则嵌入 rPrChange
+    if revision_mode and run._r.xml != orig_xml:
+        _add_rpr_change(run, orig_rpr)
 
-def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=False):
+
+def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=False, revision_mode=False):
     """格式化段落
     
     fmt 支持的字段:
@@ -907,6 +989,11 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
         space_before  - 段前间距(磅), 默认0
         space_after   - 段后间距(磅), 默认0
     """
+    # 修订模式：记录段落格式改动前的 pPr XML
+    if revision_mode:
+        orig_ppr = deepcopy(para._p.pPr)
+        orig_ppr_xml = para._p.xml
+
     pf = para.paragraph_format
     
     # 对齐方式
@@ -956,15 +1043,15 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
                 para._p.remove(run._r)
             
             run1 = para.add_run(first_part)
-            set_font(run1, fmt['font_cn'], fmt['font_en'], fmt['size'], bold=True)
+            set_font(run1, fmt['font_cn'], fmt['font_en'], fmt['size'], bold=True, revision_mode=revision_mode)
             
             if rest_part:
                 run2 = para.add_run(rest_part)
-                set_font(run2, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False))
+                set_font(run2, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False), revision_mode=revision_mode)
         else:
             # 没找到中文句号，正常处理
             for run in para.runs:
-                set_font(run, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False))
+                set_font(run, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False), revision_mode=revision_mode)
     else:
         # 正文里的“一是/二是...”加粗前缀
         if para_type == 'body':
@@ -975,15 +1062,19 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
                 for run in list(para.runs):
                     para._p.remove(run._r)
                 run1 = para.add_run(lead)
-                set_font(run1, fmt['font_cn'], fmt['font_en'], fmt['size'], bold=True)
+                set_font(run1, fmt['font_cn'], fmt['font_en'], fmt['size'], bold=True, revision_mode=revision_mode)
                 if rest:
                     run2 = para.add_run(rest)
-                    set_font(run2, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False))
+                    set_font(run2, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False), revision_mode=revision_mode)
                 return
 
         # 正常处理
         for run in para.runs:
-            set_font(run, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False))
+            set_font(run, fmt['font_cn'], fmt['font_en'], fmt['size'], fmt.get('bold', False), revision_mode=revision_mode)
+
+    # 修订模式：若段落格式有改动则嵌入 pPrChange
+    if revision_mode and para._p.xml != orig_ppr_xml:
+        _add_ppr_change(para, orig_ppr)
 
 
 def add_page_number(doc, font_name="宋体"):
@@ -1060,12 +1151,14 @@ def add_page_number(doc, font_name="宋体"):
         _build_footer_line(even_footer, WD_ALIGN_PARAGRAPH.LEFT, pad_fullwidth=False)
 
 
-def format_document(input_path, output_path, preset_name='official', progress_callback=None):
+def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False):
     """格式化文档
     
     Args:
         progress_callback: 可选回调函数，签名为 callback(current, total, stage_text)
     """
+    _revision_counter[0] = 0   # 每篇文档从 1 开始计 ID
+
     # 处理自定义预设
     if preset_name == 'custom':
         preset = load_custom_preset()
@@ -1137,6 +1230,8 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         'date': 0, 'attachment': 0, 'closing': 0
     }
     
+    prev_para_type = None
+
     for i, para in enumerate(doc.paragraphs):
         text = para.text.strip()
         if not text:
@@ -1146,14 +1241,19 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
             text, i, total_paras, 
             para.paragraph_format.alignment,
             all_texts,
-            all_texts_index=all_texts_idx_map.get(i)
+            all_texts_index=all_texts_idx_map.get(i),
+            prev_para_type=prev_para_type
         )
         
         # 选择对应的格式
         fmt_key = para_type if para_type in preset else 'body'
         fmt = preset.get(fmt_key, preset['body'])
         
-        format_paragraph(para, fmt, para_type, first_line_bold=first_line_bold)
+        format_paragraph(
+            para, fmt, para_type,
+            first_line_bold=first_line_bold,
+            revision_mode=revision_mode
+        )
         stats[para_type] = stats.get(para_type, 0) + 1
         
         # 打印处理信息
@@ -1164,6 +1264,8 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         if total_paras > 0:
             pct = 10 + int(70 * (i + 1) / total_paras)
             _progress(pct, 100, f'格式化段落 ({i + 1}/{total_paras})')
+
+        prev_para_type = para_type
     
     # 4. 处理表格
     logger.info('4. Formatting tables...')

@@ -119,13 +119,45 @@
 > * macOS 版本仅支持 `.docx` 文件；`.doc/.wps` 需要先转换为 `.docx`。
 > * 公文字体（仿宋_GB2312、黑体等）macOS 不自带，建议提前安装对应字体以获得最佳效果。未安装时工具会自动回退到 macOS 系统字体。
 
-### 国产系统用户（麒麟 / 统信 UOS）【注意：目前是测试版本，欢迎反馈bugs】
-1. **点击下载**：[**Document_Format_GUI_Linux**](https://github.com/KaguraNanaga/docformat-gui/releases/latest/download/docformat_linux)
-2. 下载后先赋予执行权限：`chmod +x docformat_linux`
-3. 双击运行或在终端执行：`./docformat_linux`
+### 国产系统用户（麒麟 / 统信 UOS / 深度 / 中标麒麟 等）
+
+> ⚠️ 目前为测试版本，欢迎在 Issues 反馈问题（请注明系统名称和版本）
+
+#### 方式一：下载预编译版本（推荐）
+
+**第一步：查询当前架构**，在终端运行：
+```bash
+uname -m
+```
+
+| 输出结果 | 适用硬件 | 下载链接 |
+|---|---|---|
+| `x86_64` | Intel / AMD / 兆芯 / 海光 | [**docformat_linux**](https://github.com/KaguraNanaga/docformat-gui/releases/latest/download/docformat_linux) |
+| `aarch64` | 飞腾 / 鲲鹏 / 树莓派 | [**docformat_linux_arm64**](https://github.com/KaguraNanaga/docformat-gui/releases/latest/download/docformat_linux_arm64) |
+
+**第二步：赋予执行权限并运行**
+```bash
+chmod +x docformat_linux          # ARM64 用户替换为 docformat_linux_arm64
+./docformat_linux
+```
+
+> 如果双击无反应，请在文件管理器中右键 → 属性 → 勾选"允许作为程序执行"
+
+#### 方式二：源码运行（binary 报错时的备选）
+
+适合 binary 无法运行的情况（如 GLIBC 版本不匹配、龙芯等其他架构）：
+```bash
+# 1. 下载源码（或从 Releases 下载源码压缩包）
+git clone https://github.com/KaguraNanaga/docformat-gui.git
+cd docformat-gui
+
+# 2. 运行安装助手（自动检测环境、安装依赖、启动程序）
+bash install.sh
+```
 
 > **注意**：
-> * Linux 版本仅支持 `.docx` 文件；`.doc/.wps` 需要在 Windows 上先转换为 `.docx`。
+> * Linux 版本仅支持 `.docx` 文件；`.doc/.wps` 请先在 Windows 上另存为 `.docx`
+> * 龙芯（LoongArch）用户请使用方式二
 
 ---
 
@@ -170,11 +202,40 @@ A：请确保：
 2. 已安装 [Visual C++ Redistributable 2015-2022](https://aka.ms/vs/17/release/vc_redist.x64.exe)
 3. 下载的是 Win7 专用版本（文件名含 `_win7`）
 
+**Q：Linux 上提示 “Exec format error” 或无法执行？**
+A：通常是架构不匹配。请先运行 `uname -m`，然后下载对应的 x86_64 或 ARM64 版本。
+
+**Q：Linux 上提示 “GLIBC_2.xx not found” 或启动失败？**
+A：系统的 glibc 版本过低或不兼容。建议改用源码方式运行：`bash install.sh`。
+
+**Q：Linux 上提示缺少 tkinter 或无法创建窗口？**
+A：请先安装系统依赖（例如 `sudo apt-get install -y python3-tk`），然后再运行 `bash install.sh`。
+
 **Q：为什么提示「文件不存在」？**
 A：请检查文件名或文件夹路径中是否包含极其生僻的特殊字符。建议将文件放在桌面或纯英文路径下尝试。
 
 **Q：可以批量处理多个文件吗？**
 A：当前版本主要针对单文件精细处理。批量处理功能已列入后续开发计划。
+
+**Q：Linux 上运行报 `GLIBC_2.xx not found` 怎么办？**
+A：这是系统 glibc 版本低于编译机导致的。请改用**方式二（源码运行）**：
+```bash
+bash install.sh
+```
+
+**Q：报错 `No module named '_tkinter'`？**
+A：系统缺少 tkinter 图形库，根据发行版执行：
+- **麒麟 / 统信 / 深度**（apt）：`sudo apt install python3-tk`
+- **中标麒麟 / UOS**（yum/dnf）：`sudo dnf install python3-tkinter`
+
+安装完成后重新运行程序。
+
+**Q：ARM / 飞腾 / 鲲鹏机器上报 `Exec format error`？**
+A：下载了 x86_64 版本但当前系统是 ARM 架构。
+先运行 `uname -m` 确认架构，然后下载对应的 `docformat_linux_arm64`，或使用 `bash install.sh`。
+
+**Q：龙芯（LoongArch）能用吗？**
+A：目前没有 LoongArch 预编译版本。请使用源码方式运行：`bash install.sh`。
 
 ---
 

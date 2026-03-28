@@ -90,24 +90,39 @@ def _get_config_dir():
 
 CONFIG_FILE = _get_config_dir() / "custom_settings.json"
 
-# 常用字体列表
-if sys.platform == 'darwin':
-    # macOS：优先显示 Windows 字体名（用户可能已安装），再列出 macOS 系统字体作为备选
-    COMMON_FONTS_CN = [
-        '仿宋_GB2312', '仿宋', '宋体', '黑体', '楷体_GB2312', '楷体',
-        '方正小标宋简体', '方正仿宋_GBK', '华文仿宋', '华文中宋',
-        'STFangsong', 'STSong', 'STHeiti', 'STKaiti', 'STZhongsong',
-        'PingFang SC', 'Songti SC', 'Heiti SC',
-    ]
-else:
-    COMMON_FONTS_CN = [
-        '仿宋_GB2312', '仿宋', '宋体', '黑体', '楷体_GB2312', '楷体',
-        '方正小标宋简体', '方正仿宋_GBK', '华文仿宋', '华文中宋'
-    ]
+# 字体列表 —— 在 Tk 根窗口创建后由 _init_system_fonts() 填充
+COMMON_FONTS_CN = []
+COMMON_FONTS_EN = []
 
-COMMON_FONTS_EN = [
-    'Times New Roman', 'Arial', 'Calibri', 'Cambria'
+# 公文常用字体（作为优先推荐，始终显示在列表顶部）
+_PRIORITY_FONTS = [
+    '仿宋_GB2312', '仿宋', '宋体', '黑体', '楷体_GB2312', '楷体',
+    '方正小标宋简体', '方正仿宋_GBK', '华文仿宋', '华文中宋',
+    'Times New Roman', 'Arial', 'Calibri', 'Cambria',
 ]
+
+def _init_system_fonts():
+    """
+    从系统读取所有已安装字体，填充 COMMON_FONTS_CN 和 COMMON_FONTS_EN。
+    必须在 tk.Tk() 根窗口创建之后调用，且只调用一次。
+    """
+    global COMMON_FONTS_CN, COMMON_FONTS_EN
+    if COMMON_FONTS_CN:
+        return
+    try:
+        import tkinter.font as tkfont
+        all_fonts = sorted(
+            f for f in set(tkfont.families())
+            if f and not f.startswith('@')
+        )
+        priority = [f for f in _PRIORITY_FONTS if f in set(all_fonts)]
+        rest = [f for f in all_fonts if f not in set(_PRIORITY_FONTS)]
+        combined = priority + rest
+        COMMON_FONTS_CN = combined
+        COMMON_FONTS_EN = combined
+    except Exception:
+        COMMON_FONTS_CN = list(_PRIORITY_FONTS)
+        COMMON_FONTS_EN = list(_PRIORITY_FONTS)
 
 # 字号对照表
 FONT_SIZES = [
@@ -179,6 +194,7 @@ DEFAULT_CUSTOM_SETTINGS = {
         'size': 12, 'bold': False, 'line_spacing': 22,
         'first_line_indent': 0, 'header_bold': True
     },
+    'space_handling': 'remove_all',
     'first_line_bold': False,
     'page_number': True,
     'page_number_font': '宋体',
@@ -428,6 +444,23 @@ class CustomSettingsDialog(tk.Toplevel):
                         font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
                         activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(10, 0))
         
+        row_b_en = tk.Frame(body_frame, bg=Theme.BG)
+        row_b_en.pack(fill='x', pady=2)
+        tk.Label(
+            row_b_en, text="英数字体:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY, width=6, anchor='e'
+        ).pack(side='left')
+        self.global_font_en_var = tk.StringVar()
+        self._create_combobox(
+            row_b_en, self.global_font_en_var, COMMON_FONTS_EN, width=16,
+            initial_value=self.settings.get('body', {}).get('font_en', 'Times New Roman')
+        ).pack(side='left', padx=3)
+        tk.Label(
+            row_b_en,
+            text="  ⓘ 全文英文/数字统一使用此字体",
+            font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED
+        ).pack(side='left', padx=(10, 0))
+        
         row_b2 = tk.Frame(body_frame, bg=Theme.BG)
         row_b2.pack(fill='x', pady=2)
         tk.Label(row_b2, text="首行缩进:", font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY, width=8, anchor='e').pack(side='left')
@@ -478,7 +511,29 @@ class CustomSettingsDialog(tk.Toplevel):
         self._create_section(main, "✨ 特殊选项", pad_x)
         special_frame = tk.Frame(main, bg=Theme.BG)
         special_frame.pack(fill='x', pady=(0, 12), padx=pad_x)
-        
+
+        # 空格处理
+        space_row = tk.Frame(special_frame, bg=Theme.BG)
+        space_row.pack(anchor='w', pady=(0, 4))
+        tk.Label(
+            space_row, text="空格处理:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(6, 8))
+        self.space_handling_var = tk.StringVar(
+            value=self.settings.get('space_handling', 'remove_all')
+        )
+        for val, label in [
+            ('remove_all',      '删除全部空格'),
+                ('keep_en_boundary','规范英文/数字前后空格（补齐为一个空格）'),
+            ('keep_all',        '不处理空格'),
+        ]:
+            tk.Radiobutton(
+                space_row, text=label, value=val,
+                variable=self.space_handling_var,
+                font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
+                activebackground=Theme.BG, selectcolor=Theme.CARD,
+            ).pack(side='left', padx=(0, 8))
+
         self.first_bold_var = tk.BooleanVar(value=self.settings.get('first_line_bold', False))
         tk.Checkbutton(
             special_frame, text="正文段落首句加粗", variable=self.first_bold_var,
@@ -708,9 +763,7 @@ class CustomSettingsDialog(tk.Toplevel):
         ).pack(anchor='w', pady=(10, 4), padx=padx)
     
     def _create_combobox(self, parent, variable, values, width=15, initial_value=None):
-        """创建下拉框（OptionMenu）"""
-        frame = tk.Frame(parent, bg=Theme.INPUT_BG, highlightbackground=Theme.BORDER, highlightthickness=1)
-        
+        """创建可滚动下拉框（ttk.Combobox）"""
         if initial_value is not None:
             if initial_value in values:
                 reordered = [initial_value] + [v for v in values if v != initial_value]
@@ -719,17 +772,26 @@ class CustomSettingsDialog(tk.Toplevel):
         else:
             reordered = list(values)
         
-        menu = tk.OptionMenu(frame, variable, *reordered)
-        # tk.OptionMenu 不会可靠地设置 StringVar，需要手动设置
+        frame = tk.Frame(
+            parent, bg=Theme.INPUT_BG,
+            highlightbackground=Theme.BORDER, highlightthickness=1
+        )
+        
+        combo = ttk.Combobox(
+            frame,
+            textvariable=variable,
+            values=reordered,
+            width=width,
+            state='readonly',
+            font=get_font(10),
+        )
+        combo.pack(fill='x', padx=1, pady=1)
+        
         if initial_value is not None:
             variable.set(initial_value)
-        menu.configure(
-            font=get_font(10), bg=Theme.INPUT_BG, fg=Theme.TEXT,
-            activebackground=Theme.PRIMARY_LIGHT, activeforeground=Theme.TEXT,
-            highlightthickness=0, relief='flat', width=width, anchor='w'
-        )
-        menu['menu'].configure(font=get_font(10), bg=Theme.CARD)
-        menu.pack(fill='x')
+        
+        combo.bind('<FocusIn>',  lambda e: frame.configure(highlightbackground=Theme.PRIMARY))
+        combo.bind('<FocusOut>', lambda e: frame.configure(highlightbackground=Theme.BORDER))
         
         return frame
     
@@ -795,6 +857,9 @@ class CustomSettingsDialog(tk.Toplevel):
             self._set_size_var(self.body_size_var, s.get('body', {}).get('size', 16))
             self.line_spacing_var.set(str(s.get('body', {}).get('line_spacing', 28) or ''))
             self.body_bold_var.set(s.get('body', {}).get('bold', False))
+            self.global_font_en_var.set(
+                s.get('body', {}).get('font_en', 'Times New Roman')
+            )
             
             body_size = s.get('body', {}).get('size', 16) or 16
             indent = s.get('body', {}).get('indent', 32)
@@ -810,6 +875,7 @@ class CustomSettingsDialog(tk.Toplevel):
             
             # 特殊选项
             self.first_bold_var.set(s.get('first_line_bold', False))
+            self.space_handling_var.set(s.get('space_handling', 'remove_all'))
             self.page_number_var.set(s.get('page_number', True))
             self.page_number_font_var.set(s.get('page_number_font', '宋体'))
             
@@ -861,6 +927,7 @@ class CustomSettingsDialog(tk.Toplevel):
             indent_pt = indent_chars * body_size
             
             body_font = self.body_font_var.get()
+            global_font_en = self.global_font_en_var.get()
             body_bold = self.body_bold_var.get()
             
             # 构建基础设置 — 正文字体联动到多个元素
@@ -868,67 +935,68 @@ class CustomSettingsDialog(tk.Toplevel):
                 'name': '自定义格式',
                 'page': page,
                 'title': {
-                    'font_cn': self.title_font_var.get(), 'font_en': 'Times New Roman',
+                    'font_cn': self.title_font_var.get(), 'font_en': global_font_en,
                     'size': title_size, 'bold': self.title_bold_var.get(), 'align': 'center', 'indent': 0,
                     'line_spacing': title_ls, 'space_before': 0, 'space_after': 0
                 },
                 'recipient': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': 0,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'heading1': {
-                    'font_cn': self.h1_font_var.get(), 'font_en': 'Times New Roman',
+                    'font_cn': self.h1_font_var.get(), 'font_en': global_font_en,
                     'size': h1_size, 'bold': self.h1_bold_var.get(), 'align': 'left', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'heading2': {
-                    'font_cn': self.h2_font_var.get(), 'font_en': 'Times New Roman',
+                    'font_cn': self.h2_font_var.get(), 'font_en': global_font_en,
                     'size': h2_size, 'bold': self.h2_bold_var.get(), 'align': 'left', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'heading3': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'heading4': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'body': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'signature': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'date': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'attachment': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'closing': {
-                    'font_cn': body_font, 'font_en': 'Times New Roman',
+                    'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
                     'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
                 },
                 'table': {
-                    'font_cn': self.table_font_var.get(), 'font_en': 'Times New Roman',
+                    'font_cn': self.table_font_var.get(), 'font_en': global_font_en,
                     'size': self._get_size_from_var(self.table_size_var), 'bold': False,
                     'line_spacing': self._get_line_spacing(self.table_line_spacing_var, 22),
                     'first_line_indent': 0,
                     'header_bold': self.table_header_bold_var.get()
                 },
+                'space_handling': self.space_handling_var.get(),
                 'first_line_bold': self.first_bold_var.get(),
                 'page_number': self.page_number_var.get(),
                 'page_number_font': self.page_number_font_var.get()
@@ -1561,6 +1629,7 @@ class DocFormatApp:
     def __init__(self, root):
         self.root = root
         self.root.title("公文格式处理工具")
+        _init_system_fonts()
         self.root.geometry("750x900")
         self.root.minsize(680, 750)
         self.root.configure(bg=Theme.BG)
@@ -1570,6 +1639,7 @@ class DocFormatApp:
         self.output_file = tk.StringVar()
         self.operation = tk.StringVar(value="smart")
         self.preset = tk.StringVar(value="official")
+        self.input_files = []   # 多文件模式下存储路径列表
         
         self.preset_cards = []
         
@@ -1717,6 +1787,35 @@ class DocFormatApp:
         self.custom_card.pack(side='left', padx=(Theme.SPACE_SM, 0))
         self.preset_cards.append(self.custom_card)
         
+        # ===== 修订标记开关 =====
+        revision_row = tk.Frame(content, bg=Theme.BG)
+        revision_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
+
+        self.revision_mode_var = tk.BooleanVar(value=False)
+        self.revision_cb = tk.Checkbutton(
+            revision_row,
+            text="输出修订标记（在 Word 中可逐条接受 / 拒绝格式更改）",
+            variable=self.revision_mode_var,
+            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY,
+            activebackground=Theme.BG, selectcolor=Theme.CARD,
+            cursor='hand2', padx=6,
+        )
+        self.revision_cb.pack(side='left')
+        # ⓘ 说明按钮
+        info_btn = tk.Label(
+            revision_row,
+            text=" ⓘ ",
+            font=get_font(11),
+            bg=Theme.BG,
+            fg=Theme.TEXT_MUTED,
+            cursor='hand2',
+        )
+        info_btn.pack(side='left')
+        info_btn.bind('<Enter>', lambda e: info_btn.configure(fg=Theme.PRIMARY))
+        info_btn.bind('<Leave>', lambda e: info_btn.configure(fg=Theme.TEXT_MUTED))
+        info_btn.bind('<Button-1>', lambda e: self._show_revision_info(e))
+        # ===== 修订标记开关结束 =====
+
         
         # ===== 5. 执行按钮 =====
         self.run_btn = tk.Frame(content, bg=Theme.PRIMARY, cursor='hand2')
@@ -1809,7 +1908,7 @@ class DocFormatApp:
     def _show_about(self):
         """显示关于对话框"""
         about_text = (
-            "公文格式处理工具  v1.4.0\n\n"
+            "公文格式处理工具  v1.6.0\n\n"
             "一键将 Word 文档排版为标准公文格式\n\n"
             "开发者：KaguraNanaga\n"
             "许可证：MIT License\n"
@@ -1918,6 +2017,59 @@ class DocFormatApp:
         enabled = mode in ('smart',)
         for card in self.preset_cards:
             card.set_enabled(enabled)
+        # 修订标记仅对"智能一键处理"有效
+        if hasattr(self, 'revision_cb'):
+            if mode == 'smart':
+                self.revision_cb.configure(state='normal', fg=Theme.TEXT_SECONDARY)
+            else:
+                self.revision_mode_var.set(False)
+                self.revision_cb.configure(state='disabled', fg=Theme.TEXT_MUTED)
+
+    def _show_revision_info(self, event):
+        """弹出修订标记说明小窗"""
+        popup = tk.Toplevel(self.root)
+        popup.overrideredirect(True)   # 无标题栏
+        popup.configure(bg=Theme.CARD)
+
+        # 描边效果：外层 Frame
+        border = tk.Frame(popup, bg=Theme.BORDER, padx=1, pady=1)
+        border.pack()
+
+        inner = tk.Frame(border, bg=Theme.CARD)
+        inner.pack()
+
+        msg = (
+            "修订标记仅记录以下格式变更：\n"
+            "  · 字体、字号\n"
+            "  · 首行缩进、对齐方式\n"
+            "  · 行距、段前段后间距\n\n"
+            "以下改动不会显示为修订标记：\n"
+            "  · 标点符号替换\n"
+            "  · 空格删除"
+        )
+        tk.Label(
+            inner, text=msg,
+            font=get_font(10),
+            bg=Theme.CARD, fg=Theme.TEXT,
+            justify='left',
+            padx=14, pady=10,
+        ).pack()
+
+        # 定位到点击位置附近
+        popup.update_idletasks()
+        x = event.x_root + 10
+        y = event.y_root + 10
+        # 防止超出屏幕右边
+        sw = popup.winfo_screenwidth()
+        pw = popup.winfo_reqwidth()
+        if x + pw > sw - 10:
+            x = sw - pw - 10
+        popup.geometry(f'+{x}+{y}')
+
+        # 点击任意处关闭
+        popup.bind('<Button-1>', lambda e: popup.destroy())
+        popup.focus_set()
+        popup.bind('<FocusOut>', lambda e: popup.destroy())
     
     def _open_custom_settings(self):
         """打开自定义设置窗口"""
@@ -1942,103 +2094,259 @@ class DocFormatApp:
                 ("Word 文档 (.docx)", "*.docx"),
                 ("所有文件", "*.*"),
             ]
-        filename = filedialog.askopenfilename(
-            title="选择Word文档",
+
+        filenames = filedialog.askopenfilenames(
+            title="选择Word文档（可多选）",
             filetypes=filetypes
         )
-        if filename:
-            self.input_file.set(filename)
-            p = Path(filename)
-            output_name = f"{p.stem}_processed{p.suffix}"
-            self.output_file.set(str(p.parent / output_name))
-            self.log_panel.log(f"已选择: {p.name}", 'info')
-            self.log_panel.log(f"输出格式已自动设置为: {p.suffix or '.docx'}", 'info')
-            self.result_panel.reset()
+        if not filenames:
+            return
+
+        # 用 clear+extend 原地修改，避免外部引用失效
+        self.input_files.clear()
+        self.input_files.extend(filenames)
+
+        first = Path(filenames[0])
+
+        if len(filenames) == 1:
+            self.input_file.set(str(filenames[0]))
+            self.output_file.set(str(first.parent / f"{first.stem}_processed{first.suffix}"))
+            self.log_panel.log(f"已选择: {first.name}", 'info')
+        else:
+            # 多文件：手动更新显示，输出设为第一个文件的目录
+            self.input_file.set(str(filenames[0]))
+            self.input_field.filename_label.configure(
+                text=f"已选择 {len(filenames)} 个文件  ({first.name} ...)",
+                fg=Theme.TEXT
+            )
+            self.output_file.set(str(first.parent))
+            self.output_field.filename_label.configure(
+                text=f"输出目录: {first.parent.name}",
+                fg=Theme.TEXT
+            )
+            self.log_panel.log(f"已选择 {len(filenames)} 个文件，输出目录: {first.parent}", 'info')
+
+        self.result_panel.reset()
     
     def browse_output(self):
+        # 多文件模式：选择输出目录
+        if len(self.input_files) > 1:
+            directory = filedialog.askdirectory(
+                title="选择输出目录",
+                initialdir=str(Path(self.input_files[0]).parent)
+            )
+            if directory:
+                self.output_file.set(directory)
+                self.output_field.filename_label.configure(
+                    text=f"输出目录: {Path(directory).name}",
+                    fg=Theme.TEXT
+                )
+                self.log_panel.log(f"输出目录: {directory}", 'info')
+            return
+
+        # 单文件模式：原有行为
         is_windows = (os.name == 'nt')
         if is_windows:
             filetypes = [
-                ("所有支持格式", "*.docx *.doc *.wps"),   # ← 默认选中，空格分隔
+                ("所有支持格式", "*.docx *.doc *.wps"),
                 ("Word 文档 (.docx)", "*.docx"),
                 ("Word 97-2003 (.doc)", "*.doc"),
                 ("WPS 文档 (.wps)", "*.wps"),
             ]
         else:
-            filetypes = [
-                ("Word 文档 (.docx)", "*.docx"),
-            ]
+            filetypes = [("Word 文档 (.docx)", "*.docx")]
+
+        default_name = ""
+        if self.input_files:
+            p = Path(self.input_files[0])
+            default_name = f"{p.stem}_processed{p.suffix}"
+
         filename = filedialog.asksaveasfilename(
             title="保存为",
             defaultextension=".docx",
-            filetypes=filetypes
+            filetypes=filetypes,
+            initialfile=default_name
         )
         if filename:
             self.output_file.set(filename)
     
     def run_operation(self):
-        input_path = self.input_file.get().strip()
-        output_path = self.output_file.get().strip()
+        # 确定输入列表
+        if self.input_files:
+            input_paths = self.input_files[:]
+        else:
+            p = self.input_file.get().strip()
+            if not p:
+                messagebox.showerror("提示", "请先选择输入文件")
+                return
+            input_paths = [p]
+
+        output_base = self.output_file.get().strip()
         mode = self.operation.get()
-        
-        if not input_path:
-            messagebox.showerror("提示", "请先选择输入文件")
-            return
-        
-        if not os.path.exists(input_path):
-            messagebox.showerror("错误", "文件不存在")
+
+        # 验证文件存在
+        for p in input_paths:
+            if not os.path.exists(p):
+                messagebox.showerror("错误", f"文件不存在:\n{p}")
+                return
+
+        # Linux 格式限制
+        if os.name != 'nt':
+            for p in input_paths:
+                if Path(p).suffix.lower() in ('.doc', '.wps'):
+                    messagebox.showerror(
+                        "不支持的格式",
+                        "当前系统仅支持 .docx 文件。\n.doc/.wps 请先另存为 .docx。"
+                    )
+                    return
+
+        if mode != 'analyze' and not output_base:
+            messagebox.showerror("提示", "请指定输出文件或目录")
             return
 
-        # Linux: 仅支持 .docx，.doc/.wps 需在 Windows 上转换
-        if os.name != 'nt':
-            input_ext = Path(input_path).suffix.lower()
-            output_ext = Path(output_path).suffix.lower() if output_path else ''
-            if input_ext in ('.doc', '.wps') or output_ext in ('.doc', '.wps'):
-                messagebox.showerror(
-                    "不支持的格式",
-                    "当前系统仅支持 .docx 文件。\n.doc/.wps 文件请先在WPS/Word 另存为 .docx 后再处理。"
-                )
-                return
-        
-        if mode != 'analyze' and not output_path:
-            messagebox.showerror("提示", "请指定输出文件")
-            return
-        
+        # 诊断模式仅支持单文件
+        if mode == 'analyze' and len(input_paths) > 1:
+            messagebox.showwarning("提示", "诊断模式每次仅处理一个文件，将只分析第一个文件。")
+            input_paths = input_paths[:1]
+
         self.run_btn.configure(bg=Theme.TEXT_MUTED)
         self.run_label.configure(bg=Theme.TEXT_MUTED, text="处理中...")
         self._show_progress()
-        
+
+        rev_mode = self.revision_mode_var.get() if hasattr(self, 'revision_mode_var') else False
         thread = threading.Thread(
             target=self._do_operation,
-            args=(input_path, output_path, mode)
+            args=(input_paths, output_base, mode, rev_mode)
         )
         thread.start()
     
-    def _do_operation(self, input_path, output_path, mode):
+    def _do_operation(self, input_paths, output_base, mode, revision_mode=False):
+        """批量调度器：循环处理每个文件，汇总结果。"""
+        total = len(input_paths)
+        success_paths = []
+        failed_files = []
+
+        try:
+            self.log_panel.log(f"\n{'─' * 35}", 'info')
+            self.log_panel.log(
+                f"开始处理 {total} 个文件..." if total > 1 else f"开始处理: {Path(input_paths[0]).name}",
+                'info'
+            )
+
+            for idx, input_path in enumerate(input_paths):
+                offset = int(idx / total * 100)
+                per_range = int(1 / total * 100) or 1
+
+                def make_progress_fn(off, rng):
+                    return lambda pct, text: self._update_progress(
+                        off + pct * rng // 100, 100, text
+                    )
+                progress_fn = make_progress_fn(offset, per_range)
+
+                if total > 1 or os.path.isdir(output_base):
+                    out_dir = Path(output_base)
+                    in_p = Path(input_path)
+                    out_path = str(out_dir / f"{in_p.stem}_processed{in_p.suffix}")
+                else:
+                    out_path = output_base
+
+                self.log_panel.log(
+                    f"\n[{idx + 1}/{total}] {Path(input_path).name}", 'info'
+                )
+                try:
+                    actual_out, summary = self._process_single_file(
+                        input_path, out_path, mode, progress_fn,
+                        revision_mode=revision_mode
+                    )
+                    success_paths.append(actual_out)
+                    self.log_panel.log(
+                        f"  ✓ 已保存: {Path(actual_out).name}", 'success'
+                    )
+                except Exception as e:
+                    self.log_panel.log(f"  ✗ 失败: {e}", 'error')
+                    failed_files.append((Path(input_path).name, str(e)))
+
+            self._update_progress(100, 100, '完成')
+
+            if mode == 'analyze':
+                pass
+            elif failed_files:
+                summary = "\n".join(f"  • {n}: {e}" for n, e in failed_files)
+                self.log_panel.log(
+                    f"\n完成: 成功 {len(success_paths)} 个 / 失败 {len(failed_files)} 个", 'warning'
+                )
+                self.root.after(0, lambda: messagebox.showwarning(
+                    "部分文件处理失败",
+                    f"成功 {len(success_paths)} 个，失败 {len(failed_files)} 个:\n{summary}"
+                ))
+            elif total == 1:
+                fp = success_paths[0]
+                self.root.after(0, lambda: self.result_panel.show_success(
+                    "处理完成", Path(fp).name
+                ))
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "完成", f"文件已保存至:\n{fp}"
+                ))
+                self.log_panel.log("全部完成", 'success')
+            else:
+                out_dir = Path(output_base) if os.path.isdir(output_base) \
+                          else Path(success_paths[0]).parent
+                self.root.after(0, lambda: self.result_panel.show_success(
+                    f"批量处理完成", f"成功处理 {total} 个文件"
+                ))
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "完成", f"成功处理 {total} 个文件\n输出目录:\n{out_dir}"
+                ))
+                self.log_panel.log(f"全部完成，共处理 {total} 个文件", 'success')
+
+        except Exception as e:
+            error_msg = str(e)
+            self.log_panel.log(f"错误: {error_msg}", 'error')
+            import traceback
+            self.log_panel.log(traceback.format_exc(), 'error')
+            self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
+
+        finally:
+            self.root.after(0, self._reset_btn)
+
+    def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False):
+        """
+        处理单个文件。
+        progress_fn(pct: int, text: str) 由调用方传入，负责映射到全局进度条。
+        返回 (实际输出路径, summary)（可能因回退而改变后缀）。
+        不调用 _reset_btn，不显示完成 messagebox（由调用方统一处理）。
+        """
         temp_docx = None
         temp_output_docx = None
+
+        # 确定空格处理模式
+        preset_name = self.preset.get() if hasattr(self, 'preset') else 'official'
+        if preset_name == 'custom':
+            try:
+                _cs = load_custom_settings()
+                space_mode = _cs.get('space_handling', 'remove_all')
+            except Exception:
+                space_mode = 'remove_all'
+        else:
+            space_mode = 'remove_all'
         try:
             from docx import Document
-            
-            self.log_panel.log(f"\n{'─' * 35}", 'info')
-            self.log_panel.log(f"开始处理: {Path(input_path).name}", 'info')
-            
+
             ext = Path(input_path).suffix.lower()
             if ext in ('.doc', '.wps'):
-                self._update_progress(0, 100, f'转换 {ext} 为 .docx...')
+                progress_fn(0, f'转换 {ext} 为 .docx...')
                 self.log_panel.log(f"检测到 {ext} 格式，正在转换...", 'info')
                 from scripts.converter import convert_to_docx
                 try:
                     temp_docx = convert_to_docx(input_path)
-                except RuntimeError as e:
+                except RuntimeError:
                     self.root.after(0, lambda: messagebox.showerror(
-                        "转换失败",
-                        "未检测到 WPS 或 Microsoft Office，请先安装后再试。"
+                        "转换失败", "未检测到 WPS 或 Microsoft Office，请先安装后再试。"
                     ))
                     raise
                 input_path = temp_docx
                 self.log_panel.log("转换成功", 'success')
-            
+
             output_ext = Path(output_path).suffix.lower()
             needs_convert_back = output_ext in ('.doc', '.wps')
             if needs_convert_back:
@@ -2048,9 +2356,9 @@ class DocFormatApp:
                 output_path_docx = temp_output_docx
             else:
                 output_path_docx = output_path
-            
+
             if mode == 'analyze':
-                self._update_progress(10, 100, '正在诊断...')
+                progress_fn(10, '正在诊断...')
                 doc = Document(input_path)
                 results = {
                     'punctuation': analyze_punctuation(doc),
@@ -2058,66 +2366,55 @@ class DocFormatApp:
                     'paragraph': analyze_paragraph_format(doc),
                     'font': analyze_font(doc)
                 }
-                self._update_progress(100, 100, '诊断完成')
+                progress_fn(100, '诊断完成')
                 self.root.after(0, lambda: self.result_panel.show_diagnosis(results))
                 self.log_panel.log("诊断完成", 'success')
-                
+
             elif mode == 'punctuation':
-                self._update_progress(10, 100, '修复标点...')
-                self._run_punctuation(input_path, output_path_docx)
-                self._update_progress(100, 100, '完成')
-                self.root.after(0, lambda: self.result_panel.show_success(
-                    "标点修复完成", Path(output_path).name
-                ))
-                
+                progress_fn(10, '修复标点...')
+                self._run_punctuation(input_path, output_path_docx, space_mode=space_mode)
+                progress_fn(100, '完成')
+
             elif mode == 'smart':
                 import tempfile
                 with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
                     temp_path = tmp.name
-                
                 self.log_panel.log("步骤 1/2: 修复标点...", 'info')
-                self._update_progress(0, 100, '步骤 1/2: 修复标点...')
-                self._run_punctuation(input_path, temp_path, quiet=True)
-                
+                progress_fn(0, '步骤 1/2: 修复标点...')
+                self._run_punctuation(input_path, temp_path, quiet=True, space_mode=space_mode)
                 self.log_panel.log("步骤 2/2: 应用格式...", 'info')
-                self._update_progress(5, 100, '步骤 2/2: 应用格式...')
-                self._run_format(temp_path, output_path_docx)
-                
+                progress_fn(5, '步骤 2/2: 应用格式...')
+
+                def scaled_progress(pct, total, text):
+                    progress_fn(5 + int(pct * 90 / 100), text)
+                para_stats = self._run_format(temp_path, output_path_docx,
+                                 progress_callback=scaled_progress,
+                                 revision_mode=revision_mode)
                 os.unlink(temp_path)
-                
-                self.root.after(0, lambda: self.result_panel.show_success(
-                    "处理完成", Path(output_path).name
-                ))
-            
+
             if mode != 'analyze' and needs_convert_back:
                 from scripts.converter import convert_from_docx
                 try:
-                    self._update_progress(90, 100, f'转换回 {output_ext} 格式...')
+                    progress_fn(90, f'转换回 {output_ext} 格式...')
                     self.log_panel.log(f"正在转换回 {output_ext} 格式...", 'info')
                     actual_output = convert_from_docx(
                         output_path_docx, output_path,
                         format=output_ext.lstrip('.')
                     )
-                    # convert_from_docx 可能回退到 .doc（当系统没有 WPS Office 时）
                     if actual_output and actual_output != output_path:
                         output_path = actual_output
                         self.log_panel.log(
-                            f"保存 {output_ext} 需要安装 WPS Office，已自动保存为 .doc 格式",
-                            'info'
+                            f"保存 {output_ext} 需要 WPS Office，已自动保存为 .doc 格式", 'info'
                         )
-                    self._update_progress(100, 100, '完成')
                 except RuntimeError as e:
                     if "未检测到" in str(e):
                         self.root.after(0, lambda: messagebox.showerror(
-                            "转换失败",
-                            "未检测到 WPS 或 Microsoft Office，请先安装后再试。"
+                            "转换失败", "未检测到 WPS 或 Microsoft Office，请先安装后再试。"
                         ))
                         raise
-                    # 其他 RuntimeError：回退保存为 .docx
                     self._fallback_to_docx(output_path, output_path_docx)
                     output_path = str(Path(output_path).with_suffix('.docx'))
                 except Exception as e:
-                    # COM 错误等：回退保存为 .docx
                     self.log_panel.log(f"转换回 {output_ext} 失败: {e}", 'info')
                     self._fallback_to_docx(output_path, output_path_docx)
                     output_path = str(Path(output_path).with_suffix('.docx'))
@@ -2127,29 +2424,20 @@ class DocFormatApp:
                             os.unlink(output_path_docx)
                         except Exception:
                             pass
-            
-            self._update_progress(100, 100, '完成')
-            self.log_panel.log("全部完成", 'success')
-            
-            if mode != 'analyze':
-                final_path = output_path  # 捕获到局部变量供 lambda 使用
-                self.root.after(0, lambda: messagebox.showinfo(
-                    "完成", f"文件已保存至:\n{final_path}"
-                ))
-        
-        except Exception as e:
-            error_msg = str(e)  # 先保存错误信息
-            self.log_panel.log(f"错误: {error_msg}", 'error')
-            import traceback
-            self.log_panel.log(traceback.format_exc(), 'error')
-            self.root.after(0, lambda msg=error_msg: messagebox.showerror("错误", msg))
-        
+
+            return output_path, None
+
         finally:
             if temp_docx and os.path.exists(temp_docx):
-                os.unlink(temp_docx)
+                try:
+                    os.unlink(temp_docx)
+                except Exception:
+                    pass
             if temp_output_docx and os.path.exists(temp_output_docx):
-                os.unlink(temp_output_docx)
-            self.root.after(0, self._reset_btn)
+                try:
+                    os.unlink(temp_output_docx)
+                except Exception:
+                    pass
     
     def _fallback_to_docx(self, original_output_path, docx_source_path):
         """转换回原格式失败时，将已处理好的 .docx 直接保存"""
@@ -2168,7 +2456,7 @@ class DocFormatApp:
         self.run_label.configure(bg=Theme.PRIMARY, text="开始处理")
         self._hide_progress()
     
-    def _run_punctuation(self, input_path, output_path, quiet=False):
+    def _run_punctuation(self, input_path, output_path, quiet=False, space_mode='remove_all'):
         from docx import Document
         from scripts.punctuation import process_paragraph
         
@@ -2176,21 +2464,21 @@ class DocFormatApp:
         changes = 0
         
         for para in doc.paragraphs:
-            if process_paragraph(para):
+            if process_paragraph(para, space_mode=space_mode):
                 changes += 1
         
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     for para in cell.paragraphs:
-                        if process_paragraph(para):
+                        if process_paragraph(para, space_mode=space_mode):
                             changes += 1
         
         doc.save(output_path)
         if not quiet:
             self.log_panel.log(f"修复了 {changes} 处标点", 'success')
     
-    def _run_format(self, input_path, output_path):
+    def _run_format(self, input_path, output_path, progress_callback=None, revision_mode=False):
         preset_name = self.preset.get()
         
         # 设置 logging handler，让 formatter 的日志输出到日志面板
@@ -2211,8 +2499,9 @@ class DocFormatApp:
         formatter_logger.setLevel(logging.INFO)
         
         try:
+            cb = progress_callback if progress_callback is not None else self._update_progress
             format_document(input_path, output_path, preset_name,
-                           progress_callback=self._update_progress)
+                           progress_callback=cb, revision_mode=revision_mode)
         finally:
             formatter_logger.removeHandler(handler)
         
