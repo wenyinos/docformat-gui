@@ -758,7 +758,19 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
             r'的意见|的通知|的报告|的决定|的请示|的函)'
         )
         if not re.search(body_indicators, text):
-            return 'recipient'
+            # 如果下一段是标题，则当前段可能是标题的第一行，不应识别为主送机关
+            if all_texts_index is not None:
+                next_texts = all_texts[all_texts_index + 1: all_texts_index + 2]
+                for nt in next_texts:
+                    nt = nt.strip()
+                    if re.match(r'^关于.+的(通知|报告|请示|函|意见|决定|公告|通报|批复)', nt):
+                        break  # 跳过 recipient 判断，继续向下走
+                    if 15 < len(nt) < 80 and not re.search(r'[。！？，、；：]$', nt):
+                        break
+                else:
+                    return 'recipient'
+            else:
+                return 'recipient'
     
     # ===== 附件行 =====
     if re.match(r'^附件[：:]\s*', text):
@@ -817,6 +829,7 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
             title_patterns = [
                 r'^关于.+的(通知|报告|请示|函|意见|决定|公告|通报|批复|说明|方案|总结|汇报|复函|答复|建议)$',
                 r'^.{2,30}(通知|报告|请示|函|意见|决定|公告|通报|批复|工作方案|工作总结|实施方案|管理办法|暂行规定)$',
+                r'^[\u4e00-\u9fff]{2,20}(委员会|办公室|局|厅|院|部|委|中心|公司|集团|学校|大学)$',
             ]
             for pattern in title_patterns:
                 if re.match(pattern, text):
@@ -1013,8 +1026,28 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
     indent = fmt.get('indent', 0)
     if indent > 0:
         pf.first_line_indent = Pt(indent)
+        # 同时设置 w:firstLineChars 让 Word 显示为"X 字符"而非厘米
+        # w:firstLineChars 单位是 1/100 字符，2字符 = 200
+        size = fmt.get('size', 16) or 16
+        try:
+            chars_100 = int(round(indent / size * 100))
+            pPr = para._p.get_or_add_pPr()
+            ind = pPr.find(qn('w:ind'))
+            if ind is None:
+                ind = OxmlElement('w:ind')
+                pPr.append(ind)
+            ind.set(qn('w:firstLineChars'), str(chars_100))
+        except Exception:
+            pass
     else:
         pf.first_line_indent = Pt(0)
+        try:
+            pPr = para._p.get_or_add_pPr()
+            ind = pPr.find(qn('w:ind'))
+            if ind is not None:
+                ind.attrib.pop(qn('w:firstLineChars'), None)
+        except Exception:
+            pass
     
     # 行距：优先读取当前元素自身的 line_spacing，否则用全局默认值
     ls = fmt.get('line_spacing', line_spacing_pt)
@@ -1087,8 +1120,26 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
         _add_ppr_change(para, orig_ppr)
 
 
-def add_page_number(doc, font_name="宋体"):
+def add_page_number(doc, font_name="宋体", footer_distance=0.7):
     """添加页码（四号宋体，左右一字线，奇右偶左，距版心下边缘约7mm）"""
+    # 检测文档是否已有页码——如有则跳过，避免产生两套页码
+    def _footer_has_content(footer):
+        """判断页脚是否已有实质内容（非空段落或含域代码）"""
+        for para in footer.paragraphs:
+            if para.text.strip():
+                return True
+            # 检测是否含有域代码（PAGE 域）
+            for run in para.runs:
+                if run._r.xml and ('fldChar' in run._r.xml or 'instrText' in run._r.xml):
+                    return True
+        return False
+
+    for section in doc.sections:
+        odd_footer = section.footer
+        even_footer = section.even_page_footer
+        if _footer_has_content(odd_footer) or _footer_has_content(even_footer):
+            return   # 已有页码，跳过整个函数
+
     # 启用奇偶页页眉页脚（文档级）
     try:
         doc.settings.odd_and_even_pages_header_footer = True
@@ -1100,7 +1151,7 @@ def add_page_number(doc, font_name="宋体"):
     for section in doc.sections:
 
         section.odd_and_even_pages_header_footer = True
-        section.footer_distance = Cm(0.7)
+        section.footer_distance = Cm(footer_distance)
 
         odd_footer = section.footer
         even_footer = section.even_page_footer
@@ -1303,6 +1354,7 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         'unit_align': 'right',
         'unit_space_before_lines': 0.5,
         'short_text_len': 4,
+        'smart_align': False,
     }
     table_cfg = {**table_defaults, **table_fmt}
 
@@ -1418,18 +1470,22 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
                             para.paragraph_format.line_spacing = 1.5
 
                     # 对齐策略
-                    if row_idx == 0:
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    elif '合计' in cell_text or '总计' in cell_text:
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    elif serial_col_idx is not None and col_idx == serial_col_idx:
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    elif _is_numeric_text(cell_text):
-                        para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                    elif _is_short_text(cell_text, table_cfg.get('short_text_len', 4)):
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    else:
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    smart_align = table_cfg.get('smart_align', False)
+                    if smart_align:
+                        # 智能对齐：按内容类型判断
+                        if row_idx == 0:
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        elif '合计' in cell_text or '总计' in cell_text:
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        elif serial_col_idx is not None and col_idx == serial_col_idx:
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        elif _is_numeric_text(cell_text):
+                            para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        elif _is_short_text(cell_text, table_cfg.get('short_text_len', 4)):
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        else:
+                            para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    # smart_align=False 时不修改对齐，保留原始格式
 
         # 表格后空一行（若已有空行则不重复）
         if table_cfg.get('after_table_blank_line', True):
@@ -1447,7 +1503,8 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     _progress(78, 100, '添加页码...')
     if preset.get('page_number', True):
         logger.info('5. Adding page numbers...')
-        add_page_number(doc, font_name=preset.get('page_number_font', '宋体'))
+        add_page_number(doc, font_name=preset.get('page_number_font', '宋体'),
+                        footer_distance=preset.get('footer_distance', 0.7))
     else:
         logger.info('5. Skipping page numbers...')
     

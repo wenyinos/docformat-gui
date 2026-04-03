@@ -20,7 +20,7 @@
   "recipient": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 16,
+    "size": 42,
     "bold": false,
     "align": "left",
     "indent": 0,
@@ -34,7 +34,7 @@
     "size": 16,
     "bold": false,
     "align": "left",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
@@ -45,7 +45,7 @@
     "size": 16,
     "bold": false,
     "align": "left",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
@@ -53,10 +53,10 @@
   "heading3": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 16,
+    "size": 42,
     "bold": true,
     "align": "left",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
@@ -64,10 +64,10 @@
   "heading4": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 16,
+    "size": 42,
     "bold": false,
     "align": "left",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
@@ -75,18 +75,18 @@
   "body": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 14,
+    "size": 42,
     "bold": false,
     "align": "justify",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
   },
   "signature": {
     "font_cn": "仿宋_GB2312",
-    "font_en": "Times New Roman",
-    "size": 16,
+    "font_en": "黑体",
+    "size": 42,
     "bold": false,
     "align": "right",
     "indent": 0,
@@ -97,7 +97,7 @@
   "date": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 16,
+    "size": 42,
     "bold": false,
     "align": "right",
     "indent": 0,
@@ -106,23 +106,23 @@
     "space_after": 0
   },
   "attachment": {
-    "font_cn": "仿宋_GB2312",
+    "font_cn": "Times New Roman",
     "font_en": "Times New Roman",
-    "size": 16,
+    "size": 42,
     "bold": false,
     "align": "justify",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
   },
   "closing": {
     "font_cn": "仿宋_GB2312",
-    "font_en": "Times New Roman",
-    "size": 16,
+    "font_en": "宋体",
+    "size": 26,
     "bold": false,
     "align": "left",
-    "indent": 28,
+    "indent": 84,
     "line_spacing": 28,
     "space_before": 0,
     "space_after": 0
@@ -130,15 +130,17 @@
   "table": {
     "font_cn": "仿宋_GB2312",
     "font_en": "Times New Roman",
-    "size": 10.5,
+    "size": 42,
     "bold": false,
     "line_spacing": 22,
     "first_line_indent": 0,
-    "header_bold": true
+    "header_bold": true,
+    "smart_align": false
   },
   "space_handling": "remove_all",
   "first_line_bold": false,
   "bold_serial": false,
   "page_number": true,
-  "page_number_font": "宋体"
+  "page_number_font": "宋体",
+  "footer_distance": 0.7
 }

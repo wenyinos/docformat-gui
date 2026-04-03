@@ -26,6 +26,20 @@ try:
 except ImportError:
     _DND_AVAILABLE = False
 
+def _open_file(path):
+    """跨平台打开文件"""
+    try:
+        if os.name == 'nt':
+            os.startfile(path)
+        elif sys.platform == 'darwin':
+            import subprocess
+            subprocess.Popen(['open', path])
+        else:
+            import subprocess
+            subprocess.Popen(['xdg-open', path])
+    except Exception:
+        pass
+
 
 # ===== 设计系统 =====
 class Theme:
@@ -199,13 +213,14 @@ DEFAULT_CUSTOM_SETTINGS = {
     'table': {
         'font_cn': '仿宋_GB2312', 'font_en': 'Times New Roman',
         'size': 12, 'bold': False, 'line_spacing': 22,
-        'first_line_indent': 0, 'header_bold': True
+        'first_line_indent': 0, 'header_bold': True, 'smart_align': False
     },
     'space_handling': 'remove_all',
     'first_line_bold': False,
     'bold_serial': True,
     'page_number': True,
     'page_number_font': '宋体',
+    'footer_distance': 0.7,
 }
 
 
@@ -479,6 +494,27 @@ class CustomSettingsDialog(tk.Toplevel):
         _indent_chars = int(_indent / _bsize) if _bsize else 2
         self._create_combobox(row_b2, self.indent_var, ['0字符', '2字符', '4字符'], width=8,
                               initial_value=f'{_indent_chars}字符').pack(side='left', padx=3)
+
+        row_spacing = tk.Frame(body_frame, bg=Theme.BG)
+        row_spacing.pack(fill='x', pady=2)
+        tk.Label(
+            row_spacing, text="段前/段后:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY, width=8, anchor='e'
+        ).pack(side='left')
+        self.space_before_var = tk.StringVar(value='0')
+        tk.Entry(
+            row_spacing, textvariable=self.space_before_var,
+            font=get_font(11), width=4, relief='solid', bd=1
+        ).pack(side='left', padx=3)
+        tk.Label(row_spacing, text="/ ", font=get_font(10),
+                 bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left')
+        self.space_after_var = tk.StringVar(value='0')
+        tk.Entry(
+            row_spacing, textvariable=self.space_after_var,
+            font=get_font(11), width=4, relief='solid', bd=1
+        ).pack(side='left', padx=3)
+        tk.Label(row_spacing, text="磅  ⓘ 全文段前/段后统一设置",
+                 font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left', padx=(4,0))
         
         tk.Label(row_b2, text="  ⓘ 正文字体/字号同时应用于: 三/四级标题、落款、附件、结束语",
                  font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left', padx=(10, 0))
@@ -514,6 +550,27 @@ class CustomSettingsDialog(tk.Toplevel):
             font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
             activebackground=Theme.BG, selectcolor=Theme.CARD,
         ).pack(side='left', padx=(6, 0))
+        
+        self.table_smart_align_var = tk.BooleanVar(
+            value=self.settings.get('table', {}).get('smart_align', False)
+        )
+        tk.Checkbutton(
+            row_tbl2, text="智能调整单元格对齐",
+            variable=self.table_smart_align_var,
+            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
+            activebackground=Theme.BG, selectcolor=Theme.CARD,
+        ).pack(side='left', padx=(16, 0))
+
+        # ⓘ 说明按钮
+        align_info_btn = tk.Label(
+            row_tbl2, text=" ⓘ ",
+            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_MUTED,
+            cursor='hand2'
+        )
+        align_info_btn.pack(side='left')
+        align_info_btn.bind('<Enter>', lambda e: align_info_btn.configure(fg=Theme.PRIMARY))
+        align_info_btn.bind('<Leave>', lambda e: align_info_btn.configure(fg=Theme.TEXT_MUTED))
+        align_info_btn.bind('<Button-1>', lambda e: self._show_table_align_info(e))
         
         # --- 特殊选项 ---
         self._create_section(main, "✨ 特殊选项", pad_x)
@@ -578,6 +635,22 @@ class CustomSettingsDialog(tk.Toplevel):
             pn_row, self.page_number_font_var, page_number_fonts, width=16,
             initial_value=self.page_number_font_var.get()
         ).pack(side='left')
+
+        fd_row = tk.Frame(special_frame, bg=Theme.BG)
+        fd_row.pack(anchor='w', pady=(2, 6))
+        tk.Label(
+            fd_row, text="页码距底边:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(6, 4))
+        self.footer_distance_var = tk.StringVar(
+            value=str(self.settings.get('footer_distance', 0.7))
+        )
+        tk.Entry(
+            fd_row, textvariable=self.footer_distance_var,
+            font=get_font(11), width=5, relief='solid', bd=1
+        ).pack(side='left')
+        tk.Label(fd_row, text=" cm", font=get_font(10),
+                 bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left')
         
         # ============================================================
         #  高级设置（可折叠）
@@ -724,6 +797,46 @@ class CustomSettingsDialog(tk.Toplevel):
             'line_spacing': ls_var.get(),
             'bold': bold_var.get(),
         }
+    
+    def _show_table_align_info(self, event):
+        """弹出表格智能对齐规则说明"""
+        popup = tk.Toplevel(self)
+        popup.overrideredirect(True)
+        popup.configure(bg=Theme.CARD)
+
+        border = tk.Frame(popup, bg=Theme.BORDER, padx=1, pady=1)
+        border.pack()
+        inner = tk.Frame(border, bg=Theme.CARD)
+        inner.pack()
+
+        msg = (
+            "启用后，工具将按以下规则自动调整单元格对齐：\n\n"
+            "  · 表头行（第一行）→ 居中\n"
+            "  · 含\"合计\"/\"总计\"的单元格 → 居中\n"
+            "  · 序号列 → 居中\n"
+            "  · 纯数字/百分比/金额 → 靠右\n"
+            "  · 4字以内的短文本 → 居中\n"
+            "  · 其余较长文本 → 靠左\n\n"
+            "默认关闭，保留文档原始对齐格式。"
+        )
+        tk.Label(
+            inner, text=msg,
+            font=get_font(10), bg=Theme.CARD, fg=Theme.TEXT,
+            justify='left', padx=14, pady=10,
+        ).pack()
+
+        popup.update_idletasks()
+        x = event.x_root + 10
+        y = event.y_root + 10
+        sw = popup.winfo_screenwidth()
+        pw = popup.winfo_reqwidth()
+        if x + pw > sw - 10:
+            x = sw - pw - 10
+        popup.geometry(f'+{x}+{y}')
+
+        popup.bind('<Button-1>', lambda e: popup.destroy())
+        popup.focus_set()
+        popup.bind('<FocusOut>', lambda e: popup.destroy())
     
     def _toggle_advanced(self):
         """切换高级设置的折叠/展开"""
@@ -878,6 +991,8 @@ class CustomSettingsDialog(tk.Toplevel):
             self.global_font_en_var.set(
                 s.get('body', {}).get('font_en', 'Times New Roman')
             )
+            self.space_before_var.set(str(s.get('body', {}).get('space_before', 0)))
+            self.space_after_var.set(str(s.get('body', {}).get('space_after', 0)))
             
             body_size = s.get('body', {}).get('size', 16) or 16
             indent = s.get('body', {}).get('indent', 32)
@@ -890,6 +1005,9 @@ class CustomSettingsDialog(tk.Toplevel):
             self._set_size_var(self.table_size_var, tbl.get('size', 12))
             self.table_line_spacing_var.set(str(tbl.get('line_spacing', 22) or ''))
             self.table_header_bold_var.set(tbl.get('header_bold', True))
+            self.table_smart_align_var.set(
+                self.settings.get('table', {}).get('smart_align', False)
+            )
             
             # 特殊选项
             self.first_bold_var.set(s.get('first_line_bold', False))
@@ -897,6 +1015,7 @@ class CustomSettingsDialog(tk.Toplevel):
             self.space_handling_var.set(s.get('space_handling', 'remove_all'))
             self.page_number_var.set(s.get('page_number', True))
             self.page_number_font_var.set(s.get('page_number_font', '宋体'))
+            self.footer_distance_var.set(str(s.get('footer_distance', 0.7)))
             
             # 高级设置
             for key, vars_dict in self._adv_vars.items():
@@ -939,6 +1058,11 @@ class CustomSettingsDialog(tk.Toplevel):
             body_size = self._get_size_from_var(self.body_size_var)
             body_ls = self._get_line_spacing(self.line_spacing_var, 28)
             title_ls = self._get_line_spacing(self.title_line_spacing_var, 28)
+            try:
+                space_before = int(float(self.space_before_var.get()))
+                space_after = int(float(self.space_after_var.get()))
+            except ValueError:
+                space_before = space_after = 0
             
             # 首行缩进
             indent_text = self.indent_var.get()
@@ -956,70 +1080,72 @@ class CustomSettingsDialog(tk.Toplevel):
                 'title': {
                     'font_cn': self.title_font_var.get(), 'font_en': global_font_en,
                     'size': title_size, 'bold': self.title_bold_var.get(), 'align': 'center', 'indent': 0,
-                    'line_spacing': title_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': title_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'recipient': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'heading1': {
                     'font_cn': self.h1_font_var.get(), 'font_en': global_font_en,
                     'size': h1_size, 'bold': self.h1_bold_var.get(), 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'heading2': {
                     'font_cn': self.h2_font_var.get(), 'font_en': global_font_en,
                     'size': h2_size, 'bold': self.h2_bold_var.get(), 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'heading3': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'heading4': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'body': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'signature': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'date': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'attachment': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'closing': {
                     'font_cn': body_font, 'font_en': global_font_en,
                     'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': 0, 'space_after': 0
+                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
                 },
                 'table': {
                     'font_cn': self.table_font_var.get(), 'font_en': global_font_en,
                     'size': self._get_size_from_var(self.table_size_var), 'bold': False,
                     'line_spacing': self._get_line_spacing(self.table_line_spacing_var, 22),
                     'first_line_indent': 0,
-                    'header_bold': self.table_header_bold_var.get()
+                    'header_bold': self.table_header_bold_var.get(),
+                    'smart_align': self.table_smart_align_var.get()
                 },
                 'space_handling': self.space_handling_var.get(),
                 'first_line_bold': self.first_bold_var.get(),
                 'bold_serial': self.bold_serial_var.get(),
                 'page_number': self.page_number_var.get(),
-                'page_number_font': self.page_number_font_var.get()
+                'page_number_font': self.page_number_font_var.get(),
+                'footer_distance': float(self.footer_distance_var.get()) if self.footer_distance_var.get() else 0.7
             }
             
             # 应用高级设置覆盖（仅在用户真正修改过时）
@@ -1045,9 +1171,7 @@ class CustomSettingsDialog(tk.Toplevel):
                             self.settings[key]['line_spacing'] = int(float(adv_ls_str))
                         except ValueError:
                             pass
-                    adv_bold = vars_dict['bold'].get()
-                    if adv_bold != key_initial.get('bold', False):
-                        self.settings[key]['bold'] = adv_bold
+                    self.settings[key]['bold'] = vars_dict['bold'].get()
             
             save_custom_settings(self.settings)
             
@@ -1920,6 +2044,19 @@ class DocFormatApp:
         info_btn.bind('<Button-1>', lambda e: self._show_revision_info(e))
         # ===== 修订标记开关结束 =====
 
+        # ===== 完成后自动打开文件开关 =====
+        auto_open_row = tk.Frame(content, bg=Theme.BG)
+        auto_open_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
+        self.auto_open_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            auto_open_row,
+            text="处理完成后自动打开输出文件",
+            variable=self.auto_open_var,
+            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY,
+            activebackground=Theme.BG, selectcolor=Theme.CARD,
+            cursor='hand2', padx=6,
+        ).pack(side='left')
+
         
         # ===== 5. 执行按钮 =====
         self.run_btn = tk.Frame(content, bg=Theme.PRIMARY, cursor='hand2')
@@ -2403,6 +2540,8 @@ class DocFormatApp:
                 self.root.after(0, lambda: messagebox.showinfo(
                     "完成", f"文件已保存至:\n{fp}"
                 ))
+                if self.auto_open_var.get():
+                    self.root.after(100, lambda p=fp: _open_file(p))
                 self.log_panel.log("全部完成", 'success')
             else:
                 out_dir = Path(output_base) if os.path.isdir(output_base) \
