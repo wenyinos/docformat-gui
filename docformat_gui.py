@@ -21,10 +21,12 @@ from scripts.formatter import format_document, PRESETS
 
 # 拖拽支持（可选，没有安装时自动降级）
 try:
-    from tkinterdnd2 import TkinterDnD, DND_FILES
+    from tkinterdnd2 import TkinterDnD, DND_FILES, COPY
     _DND_AVAILABLE = True
 except ImportError:
     _DND_AVAILABLE = False
+
+__version__ = '1.7.2'
 
 def _open_file(path):
     """跨平台打开文件"""
@@ -218,6 +220,7 @@ DEFAULT_CUSTOM_SETTINGS = {
     'space_handling': 'remove_all',
     'first_line_bold': False,
     'bold_serial': True,
+    'split_heading_at_punct': False,
     'page_number': True,
     'page_number_font': '宋体',
     'footer_distance': 0.7,
@@ -1283,11 +1286,12 @@ class Icons:
 class FileInputField(tk.Frame):
     """文件输入框 - 带明显容器"""
     
-    def __init__(self, parent, label_text, placeholder, variable, command, **kwargs):
+    def __init__(self, parent, label_text, placeholder, variable, command, drop_command=None, **kwargs):
         super().__init__(parent, bg=Theme.BG, **kwargs)
         
         self.variable = variable
         self.command = command
+        self.drop_command = drop_command
         self.placeholder = placeholder
         
         # 标签
@@ -1338,6 +1342,7 @@ class FileInputField(tk.Frame):
             cursor='hand2'
         )
         self.action_btn.pack(side='right')
+        self._drop_widgets = [self.container, inner, self.filename_label, self.action_btn]
         
         # 绑定点击
         for widget in [self.container, inner, self.filename_label, self.action_btn]:
@@ -1360,27 +1365,33 @@ class FileInputField(tk.Frame):
             self.command()
     
     def _enable_drag_drop(self):
-        """启用拖拽文件支持 - 注册在根窗口上以绕过 canvas 事件截获"""
-        # 找到根窗口
+        """启用拖拽文件支持"""
         root = self.winfo_toplevel()
-        # 避免重复注册
         if not getattr(root, '_dnd_registered', False):
             root.drop_target_register(DND_FILES)
             root.dnd_bind('<<Drop>>', self._dispatch_drop)
             root._dnd_registered = True
             root._dnd_fields = []
-        # 把自己注册到字段列表
         if not hasattr(root, '_dnd_fields'):
             root._dnd_fields = []
-        root._dnd_fields.append(self)
+        if self not in root._dnd_fields:
+            root._dnd_fields.append(self)
+
+        for widget in self._drop_widgets:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind('<<DropEnter>>', self._on_drag_enter)
+            widget.dnd_bind('<<DropLeave>>', self._on_drag_leave)
+            widget.dnd_bind('<<Drop>>', self._on_drop)
     
     def _on_drag_enter(self, event):
         """拖拽进入时高亮边框"""
         self.container.configure(highlightbackground=Theme.PRIMARY)
+        return COPY
     
     def _on_drag_leave(self, event):
         """拖拽离开时恢复边框"""
         self.container.configure(highlightbackground=Theme.BORDER)
+        return COPY
     
     def _dispatch_drop(self, event):
         """
@@ -1426,17 +1437,11 @@ class FileInputField(tk.Frame):
         # 只取第一个文件路径（输入框单文件模式）
         path = paths[0].strip()
         if path:
-            self.variable.set(path)
-            # 通知父级 App 执行文件选定后的完整逻辑
-            # 通过调用绑定的 command（即 browse_input 对应的 _on_file_selected）
-            # 这里直接触发 variable 的 trace 已经更新了显示
-            # 额外找到根窗口的 app 实例触发完整逻辑
-            widget = self.container
-            while widget.master:
-                widget = widget.master
-                if hasattr(widget, '_on_file_selected'):
-                    widget._on_file_selected(path)
-                    break
+            if self.drop_command:
+                self.drop_command(path)
+            else:
+                self.variable.set(path)
+        return COPY
     
     def _update_display(self, *args):
         path = self.variable.get()
@@ -1913,13 +1918,15 @@ class DocFormatApp:
         # ===== 2. 文件选择区 =====
         file_section = tk.Frame(content, bg=Theme.BG)
         file_section.pack(fill='x', pady=(0, Theme.SPACE_LG))
+        placeholder_text = "点击选择文件，或将文件拖到这里" if _DND_AVAILABLE else "点击选择文件"
         
         self.input_field = FileInputField(
             file_section,
             label_text="输入",
-            placeholder="点击选择需要修改的文档",
+            placeholder=placeholder_text,
             variable=self.input_file,
-            command=self.browse_input
+            command=self.browse_input,
+            drop_command=self._on_file_selected
         )
         self.input_field.pack(fill='x', pady=(0, Theme.SPACE_SM))
         
@@ -2149,7 +2156,7 @@ class DocFormatApp:
     def _show_about(self):
         """显示关于对话框"""
         about_text = (
-            "公文格式处理工具  v1.6.0\n\n"
+            f"公文格式处理工具  v{__version__}\n\n"
             "一键将 Word 文档排版为标准公文格式\n\n"
             "开发者：KaguraNanaga\n"
             "许可证：MIT License\n"

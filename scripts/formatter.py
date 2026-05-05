@@ -279,6 +279,8 @@ PRESETS = {
             'bold': False,
             'align': 'center',
             'indent': 0,
+            'space_before': 0,
+            'space_after': 0,
         },
         # 主送机关：三号仿宋，顶格
         'recipient': {
@@ -297,6 +299,8 @@ PRESETS = {
             'bold': False,
             'align': 'left',
             'indent': 32,  # 2字符缩进
+            'space_before': 0,
+            'space_after': 0,
         },
         # 二级标题：三号楷体GB2312，"（一）"，首行缩进2字符
         'heading2': {
@@ -306,6 +310,8 @@ PRESETS = {
             'bold': False,
             'align': 'left',
             'indent': 32,
+            'space_before': 0,
+            'space_after': 0,
         },
         # 三级标题：三号仿宋GB2312，"1."，首行缩进2字符
         'heading3': {
@@ -315,6 +321,8 @@ PRESETS = {
             'bold': True,
             'align': 'left',
             'indent': 32,
+            'space_before': 0,
+            'space_after': 0,
         },
         # 四级标题：三号仿宋GB2312，"（1）"，首行缩进2字符
         'heading4': {
@@ -324,6 +332,8 @@ PRESETS = {
             'bold': False,
             'align': 'left',
             'indent': 32,
+            'space_before': 0,
+            'space_after': 0,
         },
         # 正文：三号仿宋GB2312，首行缩进2字符（32pt），行距28磅
         'body': {
@@ -684,6 +694,53 @@ def _set_cell_borders(cell, size_pt=0.5, color="000000"):
         borders.append(elem)
 
 
+def _normalize_date_text(text):
+    """Normalize common date variants before regex matching."""
+    trans = str.maketrans({
+        '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+        '５': '5', '６': '6', '７': '7', '８': '8', '９': '9',
+        '．': '.', '／': '/', '－': '-', '—': '-',
+    })
+    return re.sub(r'\s+', '', text.strip().translate(trans))
+
+
+def _is_date_text(text, date_patterns):
+    normalized = _normalize_date_text(text)
+    return any(re.match(pattern, normalized) for pattern in date_patterns)
+
+
+def _standardize_date_text(text):
+    """Convert recognized numeric date text to Chinese year/month/day form."""
+    normalized = _normalize_date_text(text)
+    match = re.match(r'^(\d{4})年(\d{1,2})月(\d{1,2})日?$', normalized)
+    if not match:
+        match = re.match(r'^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$', normalized)
+    if match:
+        year, month, day = match.groups()
+        return f'{year}年{int(month)}月{int(day)}日'
+
+    match = re.match(r'^(\d{4})年(\d{1,2})月$', normalized)
+    if not match:
+        match = re.match(r'^(\d{4})[./-](\d{1,2})$', normalized)
+    if match:
+        year, month = match.groups()
+        return f'{year}年{int(month)}月'
+
+    return text
+
+
+def _build_text_context(doc):
+    """Collect non-empty paragraph texts and map document indexes to text indexes."""
+    all_texts = []
+    all_texts_idx_map = {}
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if text:
+            all_texts_idx_map[i] = len(all_texts)
+            all_texts.append(text)
+    return all_texts, all_texts_idx_map
+
+
 def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=None, prev_para_type=None):
     """
     检测段落类型
@@ -711,10 +768,16 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
     ]
     date_patterns = [
         r'^\d{4}年\d{1,2}月\d{1,2}日$',
+        r'^\d{4}年\d{1,2}月\d{1,2}$',
+        r'^\d{4}年\d{1,2}月$',
         r'^\d{4}\.\d{1,2}\.\d{1,2}$',
+        r'^\d{4}\.\d{1,2}$',
         r'^\d{4}/\d{1,2}/\d{1,2}$',
+        r'^\d{4}/\d{1,2}$',
         r'^\d{4}-\d{1,2}-\d{1,2}$',
+        r'^\d{4}-\d{1,2}$',
         r'^二[○〇零oO0][一二三四五六七八九零〇○oO0]{2}年.{1,3}月.{1,3}日$',
+        r'^二[○〇零oO0][一二三四五六七八九零〇○oO0]{2}年.{1,3}月$',
     ]
 
     # ===== 标题续行检测 =====
@@ -723,9 +786,23 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
         is_recipient_end = re.search(r'[：:]\s*$', text)
         is_attachment = re.match(r'^附件', text)
         is_closing = any(re.match(pattern, text) for pattern in closing_patterns)
-        is_date = any(re.match(pattern, text) for pattern in date_patterns)
-        if not heading_prefix and not is_recipient_end and not is_attachment and not is_closing and not is_date and len(text) < 50:
+        is_date = _is_date_text(text, date_patterns)
+        is_sentence_end = re.search(r'[。！？.!?；;]\s*$', text)
+        if not heading_prefix and not is_recipient_end and not is_attachment and not is_closing and not is_date and not is_sentence_end and len(text) < 50:
             return 'title'
+
+    # ===== 早期日期检测（v1.7.2 新增）=====
+    # 日期格式如 "2026.04.20" 会被三级标题规则 ^\d+\.\s*\S 误匹配。
+    # 把日期检测提前，确保它优先于 heading3 触发。
+    # 注意：仅在文档后部（最后 1/3 段落）才认定为日期，避免正文中的版本号、
+    # 编号被误判（如 "1.2.3 版本说明"）。
+    if all_texts_index is not None:
+        is_in_tail = all_texts_index >= len(all_texts) * 2 // 3
+    else:
+        is_in_tail = index >= total * 2 // 3
+    if is_in_tail:
+        if _is_date_text(text, date_patterns):
+            return 'date'
     
     # ===== 一级标题："一、" "二、" 等 =====
     if re.match(r'^[一二三四五六七八九十]+、', text):
@@ -738,7 +815,9 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
         return 'heading2'
     
     # ===== 三级标题："1." "2." 等 =====
-    if re.match(r'^\d+\.\s*\S', text) and len(text) < 60:
+    # v1.7.2：约束 . 后面不能再是数字，避免误匹配 "2026.04.20" 这种点分日期
+    # 或 "1.2.3" 这种版本号
+    if re.match(r'^\d+\.\s*[^\d.\s]', text) and len(text) < 60:
         return 'heading3'
     
     # ===== 四级标题："（1）" "（2）" 等 =====
@@ -787,30 +866,51 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
     
     # ===== 落款日期 =====
     # 支持多种日期格式
-    for pattern in date_patterns:
-        if re.match(pattern, text):
-            return 'date'
+    if _is_date_text(text, date_patterns):
+        return 'date'
     
     # ===== 落款单位 =====
     # 判断逻辑：在文档后部，短文本，且下一段是日期或者是文档末尾附近
-    if index >= total - 10 and len(text) < 30:
-        # 检查是否像单位名称
-        if re.search(r'(公司|局|委|部|厅|院|所|中心|办公室|集团|银行|学校|大学|医院)$', text):
-            return 'signature'
-        # 或者检查下文是否有日期
-        if all_texts_index is not None:
-            remaining_texts = all_texts[all_texts_index + 1:]
-        else:
-            remaining_texts = []
-        for next_text in remaining_texts[:3]:
-            for pattern in date_patterns:
-                if re.match(pattern, next_text.strip()):
+    # v1.7.2：长度上限从 30 提到 60，覆盖联合发文长机关名
+    # （如"中共xx办公室、xx政府办公室、xx委员会"）
+    if index >= total - 10 and len(text) < 60:
+        allow_signature_check = True
+        # 文档开头的机关名可能是多行标题的一部分，不应被新增的“委员会”等
+        # 单位后缀规则抢先识别为落款。已经出现主送机关或一级标题后才允许
+        # 在前 5 个非空段内按落款判断。
+        title_region_idx = all_texts_index if all_texts_index is not None else index
+        if title_region_idx < 5:
+            previous_texts = all_texts[:title_region_idx] if all_texts_index is not None else all_texts[:index]
+            has_document_body_started = any(
+                re.search(r'[：:]\s*$', pt.strip()) or re.match(r'^[一二三四五六七八九十]+、', pt.strip())
+                for pt in previous_texts
+            )
+            if not has_document_body_started:
+                allow_signature_check = False
+
+        if allow_signature_check:
+            # 检查是否像单位名称
+            if re.search(r'(公司|局|委|部|厅|院|所|中心|办公室|集团|银行|学校|大学|医院|指挥部|领导小组|委员会|管理处|管委会)$', text):
+                return 'signature'
+            # 正文句即使靠近文末日期，也不应因为“下文有日期”被误判为落款。
+            if re.search(r'[。！？.!?；;]\s*$', text):
+                return 'body'
+            # 或者检查下文是否有日期
+            if all_texts_index is not None:
+                remaining_texts = all_texts[all_texts_index + 1:]
+            else:
+                remaining_texts = []
+            for next_text in remaining_texts[:3]:
+                if _is_date_text(next_text, date_patterns):
                     return 'signature'
     
     # ===== 主标题 =====
     # 公文结构：[密级/文号] → [标题] → [主送机关] → [正文/各级标题]
     # 一旦出现主送机关（以：结尾）或一级标题（一、），后续段落不再可能是主标题
-    if index < 5:
+    # 原逻辑使用 doc.paragraphs 索引，文档开头有空段时会把标题推到 index >= 5，
+    # 导致整段 title 检测被跳过；这里优先使用 all_texts_index 这个非空段索引。
+    title_region_idx = all_texts_index if all_texts_index is not None else index
+    if title_region_idx < 5:
         _check_idx = all_texts_index if all_texts_index is not None else 0
         _title_region_ended = False
         for pt in all_texts[:_check_idx]:
@@ -836,7 +936,7 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
                     return 'title'
             
             # 2. 较长的标题（20-80字符），不以标点结尾
-            if 15 < len(text) < 80 and not re.search(r'[。！？，、；：]$', text):
+            if 15 < len(text) < 80 and not re.search(r'[。！？，、；：.!?,;:]$', text):
                 # 排除以序号开头的
                 if not re.match(r'^[一二三四五六七八九十\d（(]', text):
                     return 'title'
@@ -883,6 +983,75 @@ def _split_heading_by_punct(paragraph):
     paragraph.text = head
     new_para = _insert_paragraph_after_paragraph(paragraph, text=tail)
     return new_para is not None
+
+
+def _find_paragraph_index(doc, target_para):
+    target_p = target_para._p
+    for i, para in enumerate(doc.paragraphs):
+        if para._p is target_p:
+            return i
+    return None
+
+
+def _ensure_structural_blank_lines(doc, line_spacing_pt=28):
+    """
+    Ensure the standard visible blank lines:
+    - after the title block before recipient/body
+    - before the signature block after the final body paragraph
+    Other empty paragraphs are handled separately.
+    """
+    all_texts, all_texts_idx_map = _build_text_context(doc)
+    total_paras = len(doc.paragraphs)
+    entries = []
+    prev_para_type = None
+    for i, para in enumerate(doc.paragraphs):
+        text = para.text.strip()
+        if not text:
+            continue
+        para_type = detect_para_type(
+            text, i, total_paras,
+            para.paragraph_format.alignment,
+            all_texts,
+            all_texts_index=all_texts_idx_map.get(i),
+            prev_para_type=prev_para_type
+        )
+        entries.append((para, para_type, prev_para_type))
+        prev_para_type = para_type
+
+    structural_blank_ids = set()
+    for para, para_type, prev_para_type in entries:
+        needs_blank = (
+            (prev_para_type == 'title' and para_type != 'title') or
+            (para_type == 'signature' and prev_para_type not in (None, 'signature', 'date'))
+        )
+        if not needs_blank:
+            continue
+
+        current_idx = _find_paragraph_index(doc, para)
+        if current_idx is None:
+            continue
+
+        if current_idx > 0 and not doc.paragraphs[current_idx - 1].text.strip():
+            blank_para = doc.paragraphs[current_idx - 1]
+        else:
+            blank_para = _insert_paragraph_before_paragraph(para)
+
+        _format_structural_blank_paragraph(blank_para, line_spacing_pt)
+        structural_blank_ids.add(id(blank_para._p))
+
+    return structural_blank_ids
+
+
+def _format_empty_paragraphs(doc, structural_blank_ids, line_spacing_pt=28):
+    """v1.7.2: 不再依赖 id()，改用段落 XML 上的持久标记判断。
+    structural_blank_ids 参数保留以维持接口兼容，但不再使用。"""
+    for para in doc.paragraphs:
+        if para.text.strip():
+            continue
+        if _is_structural_blank(para):
+            _format_structural_blank_paragraph(para, line_spacing_pt)
+        else:
+            _compact_empty_paragraph(para)
 
 
 # ===== 修订标记辅助 =====
@@ -945,6 +1114,98 @@ def _add_rpr_change(run, orig_rpr):
 # ===== 修订标记辅助结束 =====
 
 
+def _set_paragraph_spacing_points(para, before_pt=0, after_pt=0):
+    """Set paragraph spacing in points and clear line-based spacing leftovers."""
+    pf = para.paragraph_format
+    pf.space_before = Pt(before_pt)
+    pf.space_after = Pt(after_pt)
+
+    pPr = para._p.get_or_add_pPr()
+    spacing = pPr.find(qn('w:spacing'))
+    if spacing is None:
+        spacing = OxmlElement('w:spacing')
+        pPr.append(spacing)
+
+    for attr in ('beforeLines', 'afterLines', 'beforeAutospacing', 'afterAutospacing'):
+        spacing.attrib.pop(qn(f'w:{attr}'), None)
+
+    spacing.set(qn('w:before'), str(int(round(before_pt * 20))))
+    spacing.set(qn('w:after'), str(int(round(after_pt * 20))))
+
+
+def _force_normal_style(para):
+    """把段落 style 重置为 Normal，避免内置 Heading 样式带来的属性继承。
+
+    v1.7.2: Word 内置 Heading 1~9 / Normal (Web) 等样式自带
+    beforeAutospacing/afterAutospacing="1"，会让段前段后无法清零。
+    公文格式应走纯 Normal 样式，所有视觉效果通过段落直接属性控制。
+    """
+    try:
+        pPr = para._p.get_or_add_pPr()
+        pStyle = pPr.find(qn('w:pStyle'))
+        if pStyle is None:
+            pStyle = OxmlElement('w:pStyle')
+            # pStyle 必须放在 pPr 的最前面（W3C 规范要求）
+            pPr.insert(0, pStyle)
+        pStyle.set(qn('w:val'), 'Normal')
+    except Exception:
+        pass
+
+
+def _strip_autospacing_from_styles(doc):
+    """清理整个文档样式表里的 beforeAutospacing/afterAutospacing 属性。
+
+    v1.7.2: Word 默认内置样式带 Autospacing="1"，会让段落直接属性的
+    before/after 无法生效。公文格式不需要 Autospacing。
+    """
+    try:
+        ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+        styles_element = doc.styles.element
+        for spacing in styles_element.iter(f'{ns}spacing'):
+            for attr in ('beforeAutospacing', 'afterAutospacing'):
+                spacing.attrib.pop(f'{ns}{attr}', None)
+    except Exception:
+        pass
+
+
+def _compact_empty_paragraph(para):
+    """Clear spacing on empty paragraphs so inherited template gaps do not remain."""
+    _set_paragraph_spacing_points(para, 0, 0)
+    pf = para.paragraph_format
+    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    pf.line_spacing = Pt(1)
+
+
+def _format_structural_blank_paragraph(para, line_spacing_pt=28):
+    """Format the intentional blank line used between document sections.
+
+    v1.7.2: 在段落 pPr 上写一个自定义属性 docfmt:structural-blank=1
+    作为持久标识，避免依赖 Python 对象 id 在段落被修改后失效。
+    """
+    if not para.runs:
+        para.add_run(' ')
+    _set_paragraph_spacing_points(para, 0, 0)
+    pf = para.paragraph_format
+    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    pf.line_spacing = Pt(line_spacing_pt)
+    # 持久标记：使用自定义命名空间属性，Word 会忽略它但 python-docx 能读
+    _mark_structural_blank(para)
+
+
+def _mark_structural_blank(para):
+    """在段落 pPr 上写自定义标记，标识为结构性空行。"""
+    pPr = para._p.get_or_add_pPr()
+    pPr.set('docfmt-structural-blank', '1')
+
+
+def _is_structural_blank(para):
+    """检查段落是否被标记为结构性空行。"""
+    pPr = para._p.find('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
+    if pPr is None:
+        return False
+    return pPr.get('docfmt-structural-blank') == '1'
+
+
 def set_font(run, font_cn, font_en, size, bold=False, revision_mode=False):
     """
     设置字体，同时清除原有格式（斜体、下划线、颜色）
@@ -1002,6 +1263,9 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
         space_before  - 段前间距(磅), 默认0
         space_after   - 段后间距(磅), 默认0
     """
+    # v1.7.2: 重置段落 style 为 Normal，避免继承 Heading 样式上的 Autospacing
+    _force_normal_style(para)
+
     # 修订模式：记录段落格式改动前的 pPr XML
     if revision_mode:
         orig_ppr = deepcopy(para._p.pPr)
@@ -1058,8 +1322,11 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
         pf.line_spacing = 1.5
     
     # 段前段后（支持自定义，默认0）
-    pf.space_before = Pt(fmt.get('space_before', 0))
-    pf.space_after = Pt(fmt.get('space_after', 0))
+    _set_paragraph_spacing_points(
+        para,
+        fmt.get('space_before', 0),
+        fmt.get('space_after', 0)
+    )
     
     # 字体 - 支持首句加粗
     if first_line_bold and para_type == 'body':
@@ -1241,28 +1508,20 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     
     # 获取首句加粗选项
     first_line_bold = preset.get('first_line_bold', False)
-    bold_serial = preset.get('bold_serial', True)
+    # bold_serial 优先使用 preset 的值；preset 没设置时用入参兜底。
+    # 修复：原代码 `preset.get('bold_serial', True)` 会硬覆盖入参。
+    bold_serial = preset.get('bold_serial', bold_serial)
     
     doc = Document(input_path)
 
     # 将“标题+标点+正文”拆分为标题段+正文段
-    for para in list(doc.paragraphs):
-        _split_heading_by_punct(para)
+    # v1.7.1：默认关闭，避免破坏用户故意写成一行的合法格式（如
+    # "1. 第一阶段：完成报废资产清单整理"）。需要这个拆分的用户
+    # 可以在 preset 里设置 split_heading_at_punct=True。
+    if preset.get('split_heading_at_punct', False):
+        for para in list(doc.paragraphs):
+            _split_heading_by_punct(para)
 
-    total_paras = len(doc.paragraphs)
-    
-    # 收集所有非空段落文本，用于上下文判断
-    all_texts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-
-    # 段落索引到 all_texts 索引的映射
-    all_texts_idx_map = {}
-    at_idx = 0
-    for i, para in enumerate(doc.paragraphs):
-        text = para.text.strip()
-        if text:
-            all_texts_idx_map[i] = at_idx
-            at_idx += 1
-    
     # 进度回调辅助函数
     def _progress(current, total, stage):
         if progress_callback:
@@ -1282,6 +1541,15 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         section.bottom_margin = Cm(page['bottom'])
         section.left_margin = Cm(page['left'])
         section.right_margin = Cm(page['right'])
+
+    body_line_spacing = preset.get('body', {}).get('line_spacing', 28) or 28
+
+    # 标准公文版式保留两处可见空行：标题后、落款前。
+    # v1.7.2: 清理 styles.xml 里的 Autospacing 属性，避免内置样式覆盖直接属性
+    _strip_autospacing_from_styles(doc)
+    structural_blank_ids = _ensure_structural_blank_lines(doc, body_line_spacing)
+    total_paras = len(doc.paragraphs)
+    all_texts, all_texts_idx_map = _build_text_context(doc)
     
     # 3. 格式化段落
     logger.info('3. Formatting paragraphs...')
@@ -1297,6 +1565,10 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     for i, para in enumerate(doc.paragraphs):
         text = para.text.strip()
         if not text:
+            if _is_structural_blank(para):
+                _format_structural_blank_paragraph(para, body_line_spacing)
+            else:
+                _compact_empty_paragraph(para)
             continue
         
         para_type = detect_para_type(
@@ -1307,6 +1579,12 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
             prev_para_type=prev_para_type
         )
         
+        if para_type == 'date':
+            standardized_date = _standardize_date_text(text)
+            if standardized_date != text:
+                para.text = standardized_date
+                text = standardized_date
+
         # 选择对应的格式
         fmt_key = para_type if para_type in preset else 'body'
         fmt = preset.get(fmt_key, preset['body'])
@@ -1329,6 +1607,11 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
             _progress(pct, 100, f'格式化段落 ({i + 1}/{total_paras})')
 
         prev_para_type = para_type
+
+    # 格式化后再复查一次。部分文档的标题依赖原始对齐或字体较难在第一次
+    # 识别时命中，完成标题格式化后再补齐结构空行更稳。
+    structural_blank_ids.update(_ensure_structural_blank_lines(doc, body_line_spacing))
+    _format_empty_paragraphs(doc, structural_blank_ids, body_line_spacing)
     
     # 4. 处理表格
     logger.info('4. Formatting tables...')

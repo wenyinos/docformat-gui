@@ -7,3 +7,5 @@ lxml>=4.9,<5.0
 pywin32>=305,<307; sys_platform == 'win32'
 # PyInstaller 5.x 对 Python 3.8 支持最稳定
 pyinstaller>=5.13,<6.0
+# 文件拖拽支持（Python 3.8 锁旧版本）
+tkinterdnd2>=0.3.0,<0.4.0
