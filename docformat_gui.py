@@ -7,6 +7,8 @@
 import os
 import sys
 import threading
+import re
+import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
@@ -26,7 +28,7 @@ try:
 except ImportError:
     _DND_AVAILABLE = False
 
-__version__ = '1.7.2'
+__version__ = '1.8.1'
 
 def _open_file(path):
     """跨平台打开文件"""
@@ -204,7 +206,7 @@ DEFAULT_CUSTOM_SETTINGS = {
     },
     'attachment': {
         'font_cn': '仿宋_GB2312', 'font_en': 'Times New Roman',
-        'size': 16, 'bold': False, 'align': 'justify', 'indent': 32,
+        'size': 16, 'bold': False, 'align': 'justify', 'indent': 0,
         'line_spacing': 28, 'space_before': 0, 'space_after': 0
     },
     'closing': {
@@ -221,22 +223,92 @@ DEFAULT_CUSTOM_SETTINGS = {
     'first_line_bold': False,
     'bold_serial': True,
     'split_heading_at_punct': False,
+    'deep_clean': False,
     'page_number': True,
     'page_number_font': '宋体',
     'footer_distance': 0.7,
 }
 
 
+# v1.8.0: 配置文件 schema 版本
+CONFIG_SCHEMA_VERSION = 2
+
+# 内置只读预设的 id（与 PRESETS dict key 对应）
+BUILTIN_PRESET_IDS = ('official', 'academic', 'legal')
+
+
+def _make_default_user_preset():
+    """生成一份新的"用户自定义"预设（带新 uuid）。"""
+    import copy
+    p = copy.deepcopy(DEFAULT_CUSTOM_SETTINGS)
+    p['id'] = str(uuid.uuid4())
+    p['name'] = '我的自定义格式'
+    p['is_builtin'] = False
+    return p
+
+
+def _make_empty_config():
+    """生成一份全新的、空白的配置文件结构。"""
+    return {
+        'schema_version': CONFIG_SCHEMA_VERSION,
+        'active_preset_id': None,   # 当前选中的自定义预设 id
+        'presets': [_make_default_user_preset()],
+    }
+
+
 def load_custom_settings():
-    """加载自定义设置"""
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return _merge_settings(DEFAULT_CUSTOM_SETTINGS, data)
-        except Exception as e:
-            print(f"[警告] 加载自定义设置失败: {e}，使用默认设置")
-    return DEFAULT_CUSTOM_SETTINGS.copy()
+    """加载用户配置文件。
+    
+    v1.8.0: 引入 schema_version。老格式（顶级是 settings dict）会被
+    自动迁移到新格式（顶级有 schema_version + presets 列表）。
+    """
+    if not CONFIG_FILE.exists():
+        return _make_empty_config()
+    
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"[警告] 配置文件读取失败，使用默认: {e}")
+        return _make_empty_config()
+    
+    # 已经是新 schema：直接返回
+    if isinstance(data, dict) and data.get('schema_version') == CONFIG_SCHEMA_VERSION:
+        # 防御性检查：presets 字段必须存在且非空
+        if not data.get('presets'):
+            data['presets'] = [_make_default_user_preset()]
+        return data
+    
+    # 老 schema 迁移
+    return _migrate_legacy_config(data)
+
+
+def _migrate_legacy_config(legacy_data):
+    """把 v1.7.x 及更早的老格式配置迁移成 v1.8.0+ 的新 schema。"""
+    import copy
+    if not isinstance(legacy_data, dict):
+        return _make_empty_config()
+    
+    # 老配置就是一份完整的 settings dict（无 schema_version 字段）
+    migrated_preset = _merge_settings(DEFAULT_CUSTOM_SETTINGS, copy.deepcopy(legacy_data))
+    migrated_preset['id'] = str(uuid.uuid4())
+    migrated_preset['name'] = legacy_data.get('name', '我的自定义格式')
+    migrated_preset['is_builtin'] = False
+    
+    # 备份老配置（防意外）
+    backup_path = CONFIG_FILE.with_suffix('.json.v1bak')
+    try:
+        with open(backup_path, 'w', encoding='utf-8') as f:
+            json.dump(legacy_data, f, ensure_ascii=False, indent=2)
+        print(f"[信息] 老配置已备份到 {backup_path}")
+    except Exception:
+        pass
+    
+    return {
+        'schema_version': CONFIG_SCHEMA_VERSION,
+        'active_preset_id': migrated_preset['id'],
+        'presets': [migrated_preset],
+    }
 
 
 def _merge_settings(defaults, custom):
@@ -252,14 +324,79 @@ def _merge_settings(defaults, custom):
     return merged
 
 
-def save_custom_settings(settings):
-    """保存自定义设置"""
+def save_custom_settings(config):
+    """保存配置文件。
+    
+    Args:
+        config: 完整的 config dict（包含 schema_version、presets 等）
+    """
     try:
+        # 兼容：如果调用方还在传旧的 settings dict（无 schema_version），
+        # 自动包装成单 preset 的新 schema
+        if 'schema_version' not in config:
+            config = {
+                'schema_version': CONFIG_SCHEMA_VERSION,
+                'active_preset_id': None,
+                'presets': [{
+                    **config,
+                    'id': str(uuid.uuid4()),
+                    'name': config.get('name', '我的自定义格式'),
+                    'is_builtin': False,
+                }]
+            }
+        else:
+            config['schema_version'] = CONFIG_SCHEMA_VERSION
+        
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, ensure_ascii=False, indent=2)
+            json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[错误] 保存自定义设置失败: {e}")
-        raise
+        print(f"[错误] 保存配置失败: {e}")
+
+
+def get_active_user_preset(config):
+    """根据 active_preset_id 从 config 中取出当前选中的用户预设。
+    
+    如果 id 不存在或没有 presets，返回第一个，再不行返回新建的默认预设。
+    """
+    presets = config.get('presets', [])
+    active_id = config.get('active_preset_id')
+    if active_id:
+        for p in presets:
+            if p.get('id') == active_id:
+                return p
+    if presets:
+        return presets[0]
+    return _make_default_user_preset()
+
+
+def _fit_dialog_to_screen(dialog, parent, desired_w, desired_h, min_w, min_h):
+    """让弹窗按屏幕可用空间自动取尺寸并居中显示。"""
+    dialog.update_idletasks()
+    screen_w = dialog.winfo_screenwidth()
+    screen_h = dialog.winfo_screenheight()
+
+    max_w = max(520, screen_w - 20)
+    max_h = max(420, screen_h - 70)
+    win_w = min(desired_w, max_w)
+    win_h = min(desired_h, max_h)
+
+    dialog.minsize(min(min_w, win_w), min(min_h, win_h))
+
+    try:
+        parent.update_idletasks()
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        x = parent_x + (parent_w - win_w) // 2
+        y = parent_y + (parent_h - win_h) // 2
+    except Exception:
+        x = (screen_w - win_w) // 2
+        y = (screen_h - win_h) // 2
+
+    x = max(0, min(x, screen_w - win_w))
+    y = max(0, min(y, screen_h - win_h))
+    dialog.geometry(f"{int(win_w)}x{int(win_h)}+{int(x)}+{int(y)}")
 
 
 
@@ -272,16 +409,17 @@ class CustomSettingsDialog(tk.Toplevel):
     
     def __init__(self, parent, on_save=None):
         super().__init__(parent)
+        self.dialog = self
         
         self.on_save = on_save
-        self.settings = load_custom_settings()
+        self._config = load_custom_settings()
+        self.settings = get_active_user_preset(self._config)
+        if not self._config.get('active_preset_id') and self.settings.get('id'):
+            self._config['active_preset_id'] = self.settings['id']
         self._adv_vars = {}  # 高级模式的变量存储
         
         # 窗口设置
         self.title("自定义格式设置")
-        win_w, win_h = 1200, 860
-        self.geometry(f"{win_w}x{win_h}")
-        self.minsize(1040, 700)
         self.configure(bg=Theme.BG)
         self.resizable(True, True)
         
@@ -290,13 +428,14 @@ class CustomSettingsDialog(tk.Toplevel):
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         
-        # 居中显示
-        self.update_idletasks()
-        x = parent.winfo_x() + (parent.winfo_width() - win_w) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - win_h) // 2
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        _fit_dialog_to_screen(
+            self, parent,
+            desired_w=1600, desired_h=1100,
+            min_w=1040, min_h=720
+        )
         
         self._create_widgets()
+        self._refresh_preset_list()
         self.update_idletasks()   # 确保所有控件完成布局
         self._load_values()
         self.after_idle(self._load_values)  # 事件循环空闲后再刷新一次，兜底
@@ -333,6 +472,8 @@ class CustomSettingsDialog(tk.Toplevel):
         )
         cancel_top.pack(side='right', padx=(0, 10))
         cancel_top.bind('<Button-1>', lambda e: self._on_close())
+
+        self._build_preset_bar(self)
         
         # ===== 滚动区域 =====
         scroll_container = tk.Frame(self, bg=Theme.BG)
@@ -340,11 +481,9 @@ class CustomSettingsDialog(tk.Toplevel):
         
         self.canvas = tk.Canvas(scroll_container, bg=Theme.BG, highlightthickness=0)
         scrollbar = tk.Scrollbar(scroll_container, orient='vertical', command=self.canvas.yview)
-        h_scrollbar = tk.Scrollbar(scroll_container, orient='horizontal', command=self.canvas.xview)
         
-        self.canvas.configure(yscrollcommand=scrollbar.set, xscrollcommand=h_scrollbar.set)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side='right', fill='y')
-        h_scrollbar.pack(side='bottom', fill='x')
         self.canvas.pack(side='left', fill='both', expand=True)
         
         self.content_frame = tk.Frame(self.canvas, bg=Theme.BG)
@@ -619,6 +758,16 @@ class CustomSettingsDialog(tk.Toplevel):
             activebackground=Theme.BG, selectcolor=Theme.CARD,
             padx=6, pady=3
         ).pack(anchor='w')
+
+        self.deep_clean_var = tk.BooleanVar(value=self.settings.get('deep_clean', False))
+        tk.Checkbutton(
+            special_frame,
+            text="强力清洗模式（清除原文格式后再排版，适合 AI 粘贴的内容）",
+            variable=self.deep_clean_var,
+            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
+            activebackground=Theme.BG, selectcolor=Theme.CARD,
+            padx=6, pady=3
+        ).pack(anchor='w')
         
         self.page_number_var = tk.BooleanVar(value=self.settings.get('page_number', True))
         tk.Checkbutton(
@@ -701,6 +850,292 @@ class CustomSettingsDialog(tk.Toplevel):
         
         size_grip = ttk.Sizegrip(btn_frame)
         size_grip.pack(side='right', padx=(0, 2), pady=(2, 0))
+
+    def _build_preset_bar(self, parent):
+        """构建预设管理工具栏（v1.8.0 新增）。"""
+        bar = tk.Frame(parent, bg=Theme.BG)
+        bar.pack(fill='x', padx=Theme.SPACE_MD, pady=(Theme.SPACE_SM, 0))
+
+        tk.Label(bar, text='当前预设：', bg=Theme.BG,
+                 fg=Theme.TEXT, font=get_font(12)).pack(side='left')
+
+        self.preset_var = tk.StringVar()
+        self.preset_combo = ttk.Combobox(
+            bar, textvariable=self.preset_var,
+            state='readonly', width=24, font=get_font(12)
+        )
+        self.preset_combo.pack(side='left', padx=(Theme.SPACE_XS, Theme.SPACE_MD))
+        self.preset_combo.bind('<<ComboboxSelected>>', self._on_preset_selected)
+
+        btn_style = {'bg': Theme.BG, 'fg': Theme.TEXT,
+                     'font': get_font(11), 'relief': 'flat',
+                     'cursor': 'hand2', 'padx': Theme.SPACE_SM, 'pady': 2,
+                     'borderwidth': 1, 'highlightthickness': 0}
+        tk.Button(bar, text='+ 新建', command=self._on_new_preset,
+                  **btn_style).pack(side='left', padx=2)
+        tk.Button(bar, text='✎ 重命名', command=self._on_rename_preset,
+                  **btn_style).pack(side='left', padx=2)
+        tk.Button(bar, text='🗑 删除', command=self._on_delete_preset,
+                  **btn_style).pack(side='left', padx=2)
+
+        # 分隔
+        tk.Frame(bar, width=1, bg=Theme.BORDER).pack(
+            side='left', fill='y', padx=Theme.SPACE_MD, pady=4
+        )
+
+        tk.Button(bar, text='⬆ 导出', command=self._on_export_preset,
+                  **btn_style).pack(side='left', padx=2)
+        tk.Button(bar, text='⬇ 导入', command=self._on_import_preset,
+                  **btn_style).pack(side='left', padx=2)
+
+        return bar
+
+    def _refresh_preset_list(self):
+        """刷新下拉菜单显示。"""
+        presets = [p for p in self._config.get('presets', []) if not p.get('is_builtin')]
+        self._visible_presets = presets
+        names = [p.get('name', '未命名') for p in presets]
+        self.preset_combo['values'] = names
+
+        # 选中当前 active 的
+        active_id = self._config.get('active_preset_id')
+        if active_id:
+            for i, p in enumerate(presets):
+                if p.get('id') == active_id:
+                    self.preset_combo.current(i)
+                    return
+        if names:
+            self.preset_combo.current(0)
+            self._config['active_preset_id'] = presets[0].get('id')
+
+    def _write_current_settings_to_config(self):
+        """把当前 self.settings 写回 _config 中对应的 preset。"""
+        active_id = self._config.get('active_preset_id')
+        if active_id:
+            for i, p in enumerate(self._config.get('presets', [])):
+                if p.get('id') == active_id:
+                    self.settings['id'] = active_id
+                    self.settings['name'] = p.get('name', self.settings.get('name', '我的自定义格式'))
+                    self.settings['is_builtin'] = False
+                    self._config['presets'][i] = self.settings
+                    return
+
+    def _on_preset_selected(self, event=None):
+        """切换预设：保存当前设置回旧 preset → 加载新 preset 的值。"""
+        # 先把当前 UI 的值保存回 self.settings
+        self._save_values()
+
+        # 把 self.settings 写回当前 active preset
+        self._write_current_settings_to_config()
+
+        # 切到新选中的 preset
+        new_idx = self.preset_combo.current()
+        if new_idx < 0:
+            return
+        new_preset = self._visible_presets[new_idx]
+        self._config['active_preset_id'] = new_preset.get('id')
+
+        # 加载新 preset 的值到 UI
+        import copy
+        self.settings = copy.deepcopy(new_preset)
+        self._load_values()
+
+    def _on_new_preset(self):
+        """新建一份预设（基于当前 UI 值复制一份）。"""
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            '新建预设', '请输入预设名称：', parent=self.dialog,
+            initialvalue='新预设'
+        )
+        if not name or not name.strip():
+            return
+        name = name.strip()
+
+        # 检查重名
+        existing = [p.get('name') for p in self._config.get('presets', [])]
+        if name in existing:
+            from tkinter import messagebox
+            messagebox.showwarning('重名', f'已存在名为「{name}」的预设', parent=self.dialog)
+            return
+
+        # 基于当前 UI 值新建
+        self._save_values()
+        self._write_current_settings_to_config()
+        import copy
+        new_preset = copy.deepcopy(self.settings)
+        new_preset['id'] = str(uuid.uuid4())
+        new_preset['name'] = name
+        new_preset['is_builtin'] = False
+
+        self._config.setdefault('presets', []).append(new_preset)
+        self._config['active_preset_id'] = new_preset['id']
+        self.settings = new_preset
+        self._refresh_preset_list()
+
+    def _on_rename_preset(self):
+        """重命名当前选中的预设。"""
+        from tkinter import simpledialog, messagebox
+        active_id = self._config.get('active_preset_id')
+        if not active_id:
+            return
+        cur = next((p for p in self._config['presets']
+                    if p.get('id') == active_id), None)
+        if not cur:
+            return
+
+        new_name = simpledialog.askstring(
+            '重命名预设', '新名称：', parent=self.dialog,
+            initialvalue=cur.get('name', '')
+        )
+        if not new_name or not new_name.strip():
+            return
+        new_name = new_name.strip()
+
+        # 检查重名
+        existing = [p.get('name') for p in self._config['presets']
+                    if p.get('id') != active_id]
+        if new_name in existing:
+            messagebox.showwarning('重名', f'已存在名为「{new_name}」的预设', parent=self.dialog)
+            return
+
+        cur['name'] = new_name
+        self.settings['name'] = new_name
+        self._refresh_preset_list()
+
+    def _on_delete_preset(self):
+        """删除当前选中的预设。最后一份不能删（保护）。"""
+        from tkinter import messagebox
+        presets = self._config.get('presets', [])
+        if len(presets) <= 1:
+            messagebox.showinfo('提示', '至少需要保留一份预设，不能删除最后一份', parent=self.dialog)
+            return
+
+        active_id = self._config.get('active_preset_id')
+        cur = next((p for p in presets if p.get('id') == active_id), None)
+        if not cur:
+            return
+
+        if not messagebox.askyesno(
+            '确认删除',
+            f'确定要删除预设「{cur.get("name", "?")}」吗？此操作不可撤销。',
+            parent=self.dialog
+        ):
+            return
+
+        self._config['presets'] = [p for p in presets if p.get('id') != active_id]
+        new_active = self._config['presets'][0]
+        self._config['active_preset_id'] = new_active.get('id')
+
+        import copy
+        self.settings = copy.deepcopy(new_active)
+        self._refresh_preset_list()
+        self._load_values()
+
+    def _on_export_preset(self):
+        """导出当前选中的预设为 .json 文件。"""
+        from tkinter import filedialog, messagebox
+        import json
+
+        self._save_values()
+        self._write_current_settings_to_config()
+        active_id = self._config.get('active_preset_id')
+        cur = next((p for p in self._config.get('presets', [])
+                    if p.get('id') == active_id), None)
+        if not cur:
+            return
+
+        default_name = f"{cur.get('name', 'preset')}.docfmt.json"
+        path = filedialog.asksaveasfilename(
+            title='导出预设',
+            defaultextension='.json',
+            initialfile=default_name,
+            filetypes=[('公文格式预设', '*.json'), ('所有文件', '*.*')],
+            parent=self.dialog,
+        )
+        if not path:
+            return
+
+        # 导出时去掉 id（导入时会重新生成，避免冲突）
+        export_data = {
+            'schema_version': CONFIG_SCHEMA_VERSION,
+            'export_type': 'docformat-preset',
+            'preset': {k: v for k, v in cur.items() if k != 'id'},
+        }
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(export_data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo('导出成功', f'预设已导出到\n{path}',
+                                parent=self.dialog)
+        except Exception as e:
+            messagebox.showerror('导出失败', str(e), parent=self.dialog)
+
+    def _on_import_preset(self):
+        """导入 .json 预设文件。"""
+        from tkinter import filedialog, messagebox
+        import json
+        import copy
+
+        path = filedialog.askopenfilename(
+            title='导入预设',
+            filetypes=[('公文格式预设', '*.json'), ('所有文件', '*.*')],
+            parent=self.dialog,
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            messagebox.showerror('导入失败', f'文件无法解析：{e}',
+                                 parent=self.dialog)
+            return
+
+        # 兼容三种格式：
+        #   a) 标准导出格式：{schema_version, export_type, preset: {...}}
+        #   b) 完整 config 格式：{schema_version, presets: [...]}
+        #   c) 老 v1.7.x 单 preset 格式：直接是 settings dict
+        preset_data = None
+        if isinstance(data, dict):
+            if 'preset' in data and isinstance(data['preset'], dict):
+                preset_data = data['preset']
+            elif 'presets' in data and isinstance(data['presets'], list):
+                if data['presets']:
+                    preset_data = data['presets'][0]
+            elif 'page' in data or 'body' in data:
+                preset_data = data
+
+        if not preset_data:
+            messagebox.showerror('导入失败', '文件格式不识别',
+                                 parent=self.dialog)
+            return
+
+        new_preset = copy.deepcopy(preset_data)
+        new_preset['id'] = str(uuid.uuid4())
+        new_preset['is_builtin'] = False
+
+        base_name = new_preset.get('name', '导入的预设')
+        existing = {p.get('name') for p in self._config.get('presets', [])}
+        final_name = base_name
+        counter = 2
+        while final_name in existing:
+            final_name = f"{base_name} ({counter})"
+            counter += 1
+        new_preset['name'] = final_name
+
+        self._save_values()
+        self._write_current_settings_to_config()
+        self._config.setdefault('presets', []).append(new_preset)
+        self._config['active_preset_id'] = new_preset['id']
+        self.settings = new_preset
+        self._refresh_preset_list()
+        self._load_values()
+
+        messagebox.showinfo(
+            '导入成功',
+            f'预设已导入为「{final_name}」',
+            parent=self.dialog
+        )
     
     def _create_advanced_section(self, parent, pad_x):
         """创建可折叠的高级设置区域"""
@@ -862,9 +1297,7 @@ class CustomSettingsDialog(tk.Toplevel):
         self.canvas.configure(scrollregion=self.canvas.bbox('all'))
     
     def _on_canvas_configure(self, event):
-        # 保持内容宽度不小于画布宽度，允许水平滚动
-        content_w = self.content_frame.winfo_reqwidth()
-        self.canvas.itemconfig(self.canvas_window, width=max(event.width, content_w))
+        self.canvas.itemconfig(self.canvas_window, width=event.width)
     
     def _bind_mousewheel(self):
         self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
@@ -1015,6 +1448,7 @@ class CustomSettingsDialog(tk.Toplevel):
             # 特殊选项
             self.first_bold_var.set(s.get('first_line_bold', False))
             self.bold_serial_var.set(s.get('bold_serial', True))
+            self.deep_clean_var.set(s.get('deep_clean', False))
             self.space_handling_var.set(s.get('space_handling', 'remove_all'))
             self.page_number_var.set(s.get('page_number', True))
             self.page_number_font_var.set(s.get('page_number_font', '宋体'))
@@ -1048,135 +1482,152 @@ class CustomSettingsDialog(tk.Toplevel):
         import copy
         self.settings = copy.deepcopy(DEFAULT_CUSTOM_SETTINGS)
         self._load_values()
+
+    def _save_values(self):
+        """保存当前 UI 值到 self.settings，不写文件、不关闭弹窗。"""
+        current_name = self.settings.get('name', '我的自定义格式')
+
+        # 收集快速设置值
+        page = {key: float(self.margin_vars[key].get()) for key in ['top', 'bottom', 'left', 'right']}
+
+        title_size = self._get_size_from_var(self.title_size_var)
+        h1_size = self._get_size_from_var(self.h1_size_var)
+        h2_size = self._get_size_from_var(self.h2_size_var)
+        body_size = self._get_size_from_var(self.body_size_var)
+        body_ls = self._get_line_spacing(self.line_spacing_var, 28)
+        title_ls = self._get_line_spacing(self.title_line_spacing_var, 28)
+        try:
+            space_before = int(float(self.space_before_var.get()))
+            space_after = int(float(self.space_after_var.get()))
+        except ValueError:
+            space_before = space_after = 0
+
+        # 首行缩进
+        indent_text = self.indent_var.get()
+        indent_chars = int(float(indent_text.replace('字符', '')))
+        indent_pt = indent_chars * body_size
+
+        body_font = self.body_font_var.get()
+        global_font_en = self.global_font_en_var.get()
+        body_bold = self.body_bold_var.get()
+
+        # 构建基础设置 — 正文字体联动到多个元素
+        self.settings = {
+            'name': current_name,
+            'page': page,
+            'title': {
+                'font_cn': self.title_font_var.get(), 'font_en': global_font_en,
+                'size': title_size, 'bold': self.title_bold_var.get(), 'align': 'center', 'indent': 0,
+                'line_spacing': title_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'recipient': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': 0,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'heading1': {
+                'font_cn': self.h1_font_var.get(), 'font_en': global_font_en,
+                'size': h1_size, 'bold': self.h1_bold_var.get(), 'align': 'left', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'heading2': {
+                'font_cn': self.h2_font_var.get(), 'font_en': global_font_en,
+                'size': h2_size, 'bold': self.h2_bold_var.get(), 'align': 'left', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'heading3': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'heading4': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'body': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'signature': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'date': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'attachment': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': 0,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'closing': {
+                'font_cn': body_font, 'font_en': global_font_en,
+                'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
+                'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
+            },
+            'table': {
+                'font_cn': self.table_font_var.get(), 'font_en': global_font_en,
+                'size': self._get_size_from_var(self.table_size_var), 'bold': False,
+                'line_spacing': self._get_line_spacing(self.table_line_spacing_var, 22),
+                'first_line_indent': 0,
+                'header_bold': self.table_header_bold_var.get(),
+                'smart_align': self.table_smart_align_var.get()
+            },
+            'space_handling': self.space_handling_var.get(),
+            'first_line_bold': self.first_bold_var.get(),
+            'bold_serial': self.bold_serial_var.get(),
+            'deep_clean': self.deep_clean_var.get(),
+            'page_number': self.page_number_var.get(),
+            'page_number_font': self.page_number_font_var.get(),
+            'footer_distance': float(self.footer_distance_var.get()) if self.footer_distance_var.get() else 0.7
+        }
+
+        # 应用高级设置覆盖（仅在用户真正修改过时）
+        initial = getattr(self, '_adv_initial_values', {})
+        for key, vars_dict in self._adv_vars.items():
+            if key in self.settings and isinstance(self.settings[key], dict):
+                key_initial = initial.get(key, {})
+
+                adv_font = vars_dict['font'].get()
+                adv_font_en = vars_dict['font_en'].get()
+                adv_size = self._get_size_from_var(vars_dict['size'])
+                adv_ls_str = vars_dict['line_spacing'].get().strip()
+
+                # 只在值与初始值不同时才覆盖（说明用户主动修改了）
+                if adv_font and adv_font != key_initial.get('font', ''):
+                    self.settings[key]['font_cn'] = adv_font
+                if adv_font_en and adv_font_en != key_initial.get('font_en', ''):
+                    self.settings[key]['font_en'] = adv_font_en
+                if adv_size and vars_dict['size'].get() != key_initial.get('size', ''):
+                    self.settings[key]['size'] = adv_size
+                if adv_ls_str and adv_ls_str != key_initial.get('line_spacing', '').strip():
+                    try:
+                        self.settings[key]['line_spacing'] = int(float(adv_ls_str))
+                    except ValueError:
+                        pass
+                self.settings[key]['bold'] = vars_dict['bold'].get()
     
     def _save(self):
         """保存设置 - 快速设置为主，高级设置覆盖"""
         try:
-            # 收集快速设置值
-            page = {key: float(self.margin_vars[key].get()) for key in ['top', 'bottom', 'left', 'right']}
-            
-            title_size = self._get_size_from_var(self.title_size_var)
-            h1_size = self._get_size_from_var(self.h1_size_var)
-            h2_size = self._get_size_from_var(self.h2_size_var)
-            body_size = self._get_size_from_var(self.body_size_var)
-            body_ls = self._get_line_spacing(self.line_spacing_var, 28)
-            title_ls = self._get_line_spacing(self.title_line_spacing_var, 28)
-            try:
-                space_before = int(float(self.space_before_var.get()))
-                space_after = int(float(self.space_after_var.get()))
-            except ValueError:
-                space_before = space_after = 0
-            
-            # 首行缩进
-            indent_text = self.indent_var.get()
-            indent_chars = int(float(indent_text.replace('字符', '')))
-            indent_pt = indent_chars * body_size
-            
-            body_font = self.body_font_var.get()
-            global_font_en = self.global_font_en_var.get()
-            body_bold = self.body_bold_var.get()
-            
-            # 构建基础设置 — 正文字体联动到多个元素
-            self.settings = {
-                'name': '自定义格式',
-                'page': page,
-                'title': {
-                    'font_cn': self.title_font_var.get(), 'font_en': global_font_en,
-                    'size': title_size, 'bold': self.title_bold_var.get(), 'align': 'center', 'indent': 0,
-                    'line_spacing': title_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'recipient': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'heading1': {
-                    'font_cn': self.h1_font_var.get(), 'font_en': global_font_en,
-                    'size': h1_size, 'bold': self.h1_bold_var.get(), 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'heading2': {
-                    'font_cn': self.h2_font_var.get(), 'font_en': global_font_en,
-                    'size': h2_size, 'bold': self.h2_bold_var.get(), 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'heading3': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'heading4': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'body': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'signature': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'date': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'right', 'indent': 0,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'attachment': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'justify', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'closing': {
-                    'font_cn': body_font, 'font_en': global_font_en,
-                    'size': body_size, 'bold': body_bold, 'align': 'left', 'indent': indent_pt,
-                    'line_spacing': body_ls, 'space_before': space_before, 'space_after': space_after
-                },
-                'table': {
-                    'font_cn': self.table_font_var.get(), 'font_en': global_font_en,
-                    'size': self._get_size_from_var(self.table_size_var), 'bold': False,
-                    'line_spacing': self._get_line_spacing(self.table_line_spacing_var, 22),
-                    'first_line_indent': 0,
-                    'header_bold': self.table_header_bold_var.get(),
-                    'smart_align': self.table_smart_align_var.get()
-                },
-                'space_handling': self.space_handling_var.get(),
-                'first_line_bold': self.first_bold_var.get(),
-                'bold_serial': self.bold_serial_var.get(),
-                'page_number': self.page_number_var.get(),
-                'page_number_font': self.page_number_font_var.get(),
-                'footer_distance': float(self.footer_distance_var.get()) if self.footer_distance_var.get() else 0.7
-            }
-            
-            # 应用高级设置覆盖（仅在用户真正修改过时）
-            initial = getattr(self, '_adv_initial_values', {})
-            for key, vars_dict in self._adv_vars.items():
-                if key in self.settings and isinstance(self.settings[key], dict):
-                    key_initial = initial.get(key, {})
-                    
-                    adv_font = vars_dict['font'].get()
-                    adv_font_en = vars_dict['font_en'].get()
-                    adv_size = self._get_size_from_var(vars_dict['size'])
-                    adv_ls_str = vars_dict['line_spacing'].get().strip()
-                    
-                    # 只在值与初始值不同时才覆盖（说明用户主动修改了）
-                    if adv_font and adv_font != key_initial.get('font', ''):
-                        self.settings[key]['font_cn'] = adv_font
-                    if adv_font_en and adv_font_en != key_initial.get('font_en', ''):
-                        self.settings[key]['font_en'] = adv_font_en
-                    if adv_size and vars_dict['size'].get() != key_initial.get('size', ''):
-                        self.settings[key]['size'] = adv_size
-                    if adv_ls_str and adv_ls_str != key_initial.get('line_spacing', '').strip():
-                        try:
-                            self.settings[key]['line_spacing'] = int(float(adv_ls_str))
-                        except ValueError:
-                            pass
-                    self.settings[key]['bold'] = vars_dict['bold'].get()
-            
-            save_custom_settings(self.settings)
+            # 保存当前 UI 值回 self.settings
+            self._save_values()
+
+            # 写回 _config 中对应 preset
+            active_id = self._config.get('active_preset_id')
+            if active_id:
+                for i, p in enumerate(self._config['presets']):
+                    if p.get('id') == active_id:
+                        self.settings['id'] = active_id
+                        self.settings['is_builtin'] = False
+                        self._config['presets'][i] = self.settings
+                        break
+            save_custom_settings(self._config)
             
             if self.on_save:
                 self.on_save(self.settings)
@@ -1205,6 +1656,562 @@ class CustomSettingsDialog(tk.Toplevel):
             except Exception:
                 pass
             self.destroy()
+
+
+class PasteTextDialog(tk.Toplevel):
+    """从粘贴文本生成 docx 的对话框（v1.8.0 新增）。
+
+    用户粘贴 AI 生成的文本 → 工具创建临时 docx → 走 format_document 流程
+    → 输出格式化后的 docx。
+    """
+
+    def __init__(self, parent, on_generate=None):
+        super().__init__(parent)
+        self.on_generate = on_generate
+
+        self.title("从文本生成 docx")
+        self.configure(bg=Theme.BG)
+        self.resizable(True, True)
+
+        # 模态
+        self.transient(parent)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        _fit_dialog_to_screen(
+            self, parent,
+            desired_w=1100, desired_h=900,
+            min_w=640, min_h=560
+        )
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """构建 UI。"""
+        # ===== 顶部标题 =====
+        header = tk.Frame(self, bg=Theme.BG)
+        header.pack(fill='x', padx=20, pady=(15, 8))
+
+        tk.Label(
+            header, text="📋 从文本生成 docx", font=get_font(16, 'bold'),
+            bg=Theme.BG, fg=Theme.TEXT
+        ).pack(side='left')
+
+        cancel_top = tk.Label(
+            header, text="取消", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY, cursor='hand2', padx=10
+        )
+        cancel_top.pack(side='right')
+        cancel_top.bind('<Button-1>', lambda e: self._on_close())
+
+        # ===== 主体区域（整体可滚动）=====
+        body_container = tk.Frame(self, bg=Theme.BG)
+        body_container.pack(fill='both', expand=True, padx=(20, 10))
+
+        self.body_canvas = tk.Canvas(body_container, bg=Theme.BG, highlightthickness=0)
+        body_scrollbar = tk.Scrollbar(
+            body_container, orient='vertical', command=self.body_canvas.yview
+        )
+        self.body_canvas.configure(yscrollcommand=body_scrollbar.set)
+        body_scrollbar.pack(side='right', fill='y')
+        self.body_canvas.pack(side='left', fill='both', expand=True)
+
+        main = tk.Frame(self.body_canvas, bg=Theme.BG)
+        self.body_canvas_window = self.body_canvas.create_window(
+            (0, 0), window=main, anchor='nw'
+        )
+        main.bind(
+            '<Configure>',
+            lambda e: self.body_canvas.configure(scrollregion=self.body_canvas.bbox('all'))
+        )
+        self.body_canvas.bind(
+            '<Configure>',
+            lambda e: self.body_canvas.itemconfig(self.body_canvas_window, width=e.width)
+        )
+
+        # --- 文档标题 ---
+        title_label = tk.Label(
+            main, text="文档标题：", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        )
+        title_label.pack(anchor='w', pady=(0, 4))
+
+        self.title_var = tk.StringVar(value="新建文档")
+        title_entry = tk.Entry(
+            main, textvariable=self.title_var,
+            font=get_font(12), relief='solid', bd=1,
+            bg=Theme.INPUT_BG, fg=Theme.TEXT,
+        )
+        title_entry.pack(fill='x', pady=(0, 4), ipady=4)
+
+        tk.Label(
+            main, text="ⓘ 此标题将作为文档第一段，居中、用标题字体",
+            font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED
+        ).pack(anchor='w', pady=(0, 12))
+
+        # --- 正文粘贴区 ---
+        tk.Label(
+            main, text="正文内容（粘贴 AI 生成的文本）：",
+            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(anchor='w', pady=(0, 4))
+
+        # Text 控件 + 滚动条
+        text_container = tk.Frame(
+            main, bg=Theme.INPUT_BG,
+            highlightbackground=Theme.BORDER, highlightthickness=1
+        )
+        text_container.pack(fill='both', expand=True, pady=(0, 4))
+
+        self.text_widget = tk.Text(
+            text_container,
+            font=get_font(11), bg=Theme.INPUT_BG, fg=Theme.TEXT,
+            relief='flat', wrap='word', padx=10, pady=8,
+            insertbackground=Theme.TEXT,
+        )
+        scrollbar = tk.Scrollbar(text_container, orient='vertical',
+                                 command=self.text_widget.yview)
+        self.text_widget.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        self.text_widget.pack(side='left', fill='both', expand=True)
+
+        # 占位提示文字
+        placeholder = (
+            "粘贴 AI 生成的文本到这里...\n\n"
+            "· 每个空行分隔的段落自动作为新段\n"
+            "· 一、（一）1. 等编号自动识别为各级标题\n"
+            "· 落款单位、日期自动识别"
+        )
+        self.text_widget.insert('1.0', placeholder)
+        self.text_widget.configure(fg=Theme.TEXT_MUTED)
+        self._placeholder_active = True
+
+        self.text_widget.bind('<FocusIn>', self._clear_placeholder)
+        self.text_widget.bind('<KeyRelease>', self._update_stats)
+        self.text_widget.bind('<<Paste>>', self._on_paste)
+
+        # 字数统计
+        self.stats_label = tk.Label(
+            main, text="ⓘ 已粘贴 0 字 · 0 段",
+            font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED
+        )
+        self.stats_label.pack(anchor='w', pady=(0, 12))
+
+        # --- 保存位置 ---
+        tk.Label(
+            main, text="保存位置：", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(anchor='w', pady=(0, 4))
+
+        save_row = tk.Frame(main, bg=Theme.BG)
+        save_row.pack(fill='x', pady=(0, 8))
+
+        self.save_path_var = tk.StringVar()
+        save_entry = tk.Entry(
+            save_row, textvariable=self.save_path_var,
+            font=get_font(11), relief='solid', bd=1,
+            bg=Theme.INPUT_BG, fg=Theme.TEXT,
+        )
+        save_entry.pack(side='left', fill='x', expand=True, ipady=3)
+
+        browse_btn = tk.Label(
+            save_row, text=" 📁 浏览 ", font=get_font(11),
+            bg=Theme.BG, fg=Theme.PRIMARY, cursor='hand2',
+            padx=8, pady=4,
+        )
+        browse_btn.pack(side='left', padx=(8, 0))
+        browse_btn.bind('<Button-1>', lambda e: self._browse_save_dir())
+        browse_btn.bind('<Enter>', lambda e: browse_btn.configure(fg=Theme.PRIMARY_HOVER))
+        browse_btn.bind('<Leave>', lambda e: browse_btn.configure(fg=Theme.PRIMARY))
+
+        # 默认保存到桌面
+        desktop = Path.home() / 'Desktop'
+        if desktop.exists():
+            self.save_path_var.set(str(desktop))
+
+        # ===== 底部按钮 =====
+        btn_frame = tk.Frame(main, bg=Theme.BG)
+        btn_frame.pack(fill='x', pady=(8, 16))
+
+        tk.Frame(btn_frame, bg=Theme.BORDER, height=1).pack(fill='x', pady=(0, 12))
+
+        btn_row = tk.Frame(btn_frame, bg=Theme.BG)
+        btn_row.pack(fill='x')
+
+        # 生成按钮
+        gen_btn = tk.Frame(btn_row, bg=Theme.PRIMARY, cursor='hand2')
+        gen_btn.pack(side='right')
+        gen_label = tk.Label(
+            gen_btn, text="  生成 docx 并处理  ", font=get_font(12, 'bold'),
+            bg=Theme.PRIMARY, fg='white', pady=8, cursor='hand2'
+        )
+        gen_label.pack()
+        for w in [gen_btn, gen_label]:
+            w.bind('<Button-1>', lambda e: self._generate())
+            w.bind('<Enter>', lambda e: (gen_btn.configure(bg=Theme.PRIMARY_HOVER),
+                                          gen_label.configure(bg=Theme.PRIMARY_HOVER)))
+            w.bind('<Leave>', lambda e: (gen_btn.configure(bg=Theme.PRIMARY),
+                                          gen_label.configure(bg=Theme.PRIMARY)))
+
+        cancel_btn = tk.Label(
+            btn_row, text="取消", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY, cursor='hand2', padx=15
+        )
+        cancel_btn.pack(side='right', padx=(0, 15))
+        cancel_btn.bind('<Button-1>', lambda e: self._on_close())
+
+    def _clear_placeholder(self, event=None):
+        """首次聚焦时清掉占位文字。"""
+        if self._placeholder_active:
+            self.text_widget.delete('1.0', 'end')
+            self.text_widget.configure(fg=Theme.TEXT)
+            self._placeholder_active = False
+
+    def _on_paste(self, event=None):
+        """粘贴事件：清占位 + 延迟更新统计。"""
+        if self._placeholder_active:
+            self.text_widget.delete('1.0', 'end')
+            self.text_widget.configure(fg=Theme.TEXT)
+            self._placeholder_active = False
+        # 粘贴是异步的，延迟更新
+        self.after(50, self._update_stats)
+
+    def _update_stats(self, event=None):
+        """更新字数/段数统计。"""
+        if self._placeholder_active:
+            return
+        text = self.text_widget.get('1.0', 'end').strip()
+        char_count = len(text)
+        # 段数：以空行分隔
+        if not text:
+            para_count = 0
+        else:
+            blocks = [b for b in text.split('\n\n') if b.strip()]
+            para_count = len(blocks) if blocks else len([
+                line for line in text.split('\n') if line.strip()
+            ])
+        format_hint = ""
+        if char_count > 20:
+            is_md = _detect_markdown(text)
+            format_hint = " · 📝 Markdown 格式" if is_md else " · 纯文本"
+        self.stats_label.configure(
+            text=f"ⓘ 已粘贴 {char_count} 字 · {para_count} 段{format_hint}"
+        )
+
+    def _browse_save_dir(self):
+        """选择保存目录。"""
+        d = filedialog.askdirectory(
+            title='选择保存目录',
+            initialdir=self.save_path_var.get() or str(Path.home()),
+            parent=self,
+        )
+        if d:
+            self.save_path_var.set(d)
+
+    def _generate(self):
+        """生成 docx 并触发主流程的格式化处理。"""
+        # 验证输入
+        title = self.title_var.get().strip()
+        if not title:
+            messagebox.showwarning('提示', '请填写文档标题', parent=self)
+            return
+
+        if self._placeholder_active:
+            messagebox.showwarning('提示', '请粘贴文本内容', parent=self)
+            return
+
+        text = self.text_widget.get('1.0', 'end').strip()
+        if not text:
+            messagebox.showwarning('提示', '请粘贴文本内容', parent=self)
+            return
+
+        save_dir = self.save_path_var.get().strip()
+        if not save_dir:
+            messagebox.showwarning('提示', '请选择保存位置', parent=self)
+            return
+
+        save_dir_path = Path(save_dir)
+        if not save_dir_path.is_dir():
+            messagebox.showerror('错误', f'保存位置不是目录：{save_dir}', parent=self)
+            return
+
+        # 文件名清洗：去掉特殊字符
+        safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)
+        output_path = save_dir_path / f"{safe_title}.docx"
+
+        # v1.8.0: 检测格式
+        is_md = _detect_markdown(text)
+
+        # 调用回调，把数据交给主流程
+        if self.on_generate:
+            try:
+                self.grab_release()
+            except Exception:
+                pass
+            self.destroy()
+            self.on_generate(title, text, str(output_path), is_md)
+
+    def _on_close(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+def _create_docx_from_text(title, body_text, output_path):
+    """把"标题 + 正文文本"生成一个最简 docx 文件。
+
+    每个空行分隔的块作为一个段落。后续的 format_document 会自动识别
+    各级标题、落款等。
+
+    v1.8.0 新增。
+    """
+    from docx import Document
+
+    doc = Document()
+    # v1.8.1: 给标题段加 CENTER 对齐 + 大字号，让 detect_para_type
+    # 能稳定识别为 title（避免短标题被回退识别为 body）
+    from docx.shared import Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_para.add_run(title.strip())
+    title_run.font.size = Pt(22)
+
+    # 正文：先按双换行拆段，每段内的单换行也拆成独立段（保留 AI 输出的自然分段）
+    body_text = body_text.strip()
+    if body_text:
+        blocks = body_text.split('\n\n')
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            # 块内按单换行再拆，每行作为一段
+            for line in block.split('\n'):
+                line = line.strip()
+                if line:
+                    doc.add_paragraph(line)
+
+    doc.save(output_path)
+    return output_path
+
+
+# v1.8.0: Markdown 检测与解析
+import re as _md_re
+
+
+def _detect_markdown(text):
+    """启发式判断文本是否为 Markdown 格式。"""
+    if not text or not text.strip():
+        return False
+
+    score = 0
+    lines = text.split('\n')
+
+    # 标题
+    h_pattern = _md_re.compile(r'^\s*#{1,6}\s*\S')
+    h_count = sum(1 for line in lines if h_pattern.match(line))
+    if h_count >= 1:
+        score += 3
+
+    # 加粗
+    bold_count = len(_md_re.findall(r'\*\*[^*\n]+\*\*', text))
+    if bold_count >= 2:
+        score += 2
+
+    # 无序列表
+    ul_pattern = _md_re.compile(r'^\s*[-*+]\s+\S')
+    ul_count = sum(1 for line in lines if ul_pattern.match(line))
+    if ul_count >= 2:
+        score += 2
+
+    # 代码块
+    if '```' in text:
+        score += 2
+
+    # 引用
+    quote_count = sum(1 for line in lines if line.startswith('> '))
+    if quote_count >= 1:
+        score += 1
+
+    return score >= 3
+
+
+def _parse_markdown_inline(text):
+    """解析单行内的 Markdown 行内格式，返回 [(text, is_bold), ...]。"""
+    parts = []
+    pattern = _md_re.compile(r'\*\*([^*\n]+)\*\*|__([^_\n]+)__')
+    last_end = 0
+
+    for m in pattern.finditer(text):
+        # 加粗前的普通文本
+        if m.start() > last_end:
+            parts.append((text[last_end:m.start()], False))
+        # 加粗内容
+        bold_text = m.group(1) or m.group(2)
+        if bold_text:
+            parts.append((bold_text, True))
+        last_end = m.end()
+
+    # 末尾普通文本
+    if last_end < len(text):
+        parts.append((text[last_end:], False))
+
+    return parts if parts else [(text, False)]
+
+
+def _create_docx_from_markdown(title, md_text, output_path):
+    """把 Markdown 文本解析为 docx。"""
+    from docx import Document
+
+    doc = Document()
+
+    # 解析 Markdown 文本
+    lines = md_text.split('\n')
+
+    # 标题计数器，把 ##/###/#### 转成 一、/(一)/1. 等中文格式
+    h2_counter = 0
+    h3_counters = {}  # h2_index -> h3_count
+    h4_counters = {}  # (h2_index, h3_index) -> h4_count
+    current_h2 = 0
+    current_h3 = 0
+
+    # 中文数字
+    cn_nums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+               '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十']
+
+    def cn(n):
+        return cn_nums[n - 1] if 1 <= n <= len(cn_nums) else str(n)
+
+    # 主标题
+    title_added = False
+
+    # 状态：是否在代码块内
+    in_code_block = False
+    code_buffer = []
+
+    h_pattern = _md_re.compile(r'^\s*(#{1,6})\s*(.*)$')
+    ul_pattern = _md_re.compile(r'^\s*[-*+]\s+(.*)$')
+    ol_pattern = _md_re.compile(r'^\s*\d+\.\s+(.*)$')
+    quote_pattern = _md_re.compile(r'^>\s+(.*)$')
+
+    def add_para_with_inline(text, is_title=False, alignment=None):
+        """添加段落，解析行内加粗。"""
+        para = doc.add_paragraph()
+        if alignment is not None:
+            para.alignment = alignment
+        parts = _parse_markdown_inline(text)
+        for content, is_bold in parts:
+            if not content:
+                continue
+            run = para.add_run(content)
+            if is_bold:
+                run.font.bold = True
+        return para
+
+    for line in lines:
+        # 代码块边界
+        if line.strip().startswith('```'):
+            if in_code_block:
+                # 结束代码块，把内容输出为段落
+                for code_line in code_buffer:
+                    if code_line.strip():
+                        doc.add_paragraph(code_line)
+                code_buffer = []
+                in_code_block = False
+            else:
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            code_buffer.append(line)
+            continue
+
+        # 空行
+        if not line.strip():
+            continue
+
+        # 标题
+        h_match = h_pattern.match(line)
+        if h_match:
+            level = len(h_match.group(1))
+            content = h_match.group(2).strip()
+
+            if level == 1:
+                # 主标题：覆盖用户输入的 title
+                if not title_added:
+                    # v1.8.1: 给 # 主标题加 CENTER + 大字号，确保
+                    # detect_para_type 识别为 title
+                    from docx.shared import Pt
+                    from docx.enum.text import WD_ALIGN_PARAGRAPH
+                    title_para = add_para_with_inline(content)
+                    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    if title_para.runs:
+                        for run in title_para.runs:
+                            run.font.size = Pt(22)
+                    title_added = True
+                else:
+                    # 文档已有标题，把额外的 # 转成一级标题
+                    h2_counter += 1
+                    add_para_with_inline(f"{cn(h2_counter)}、{content}")
+                    current_h2 = h2_counter
+                continue
+            elif level == 2:
+                h2_counter += 1
+                current_h2 = h2_counter
+                add_para_with_inline(f"{cn(h2_counter)}、{content}")
+                continue
+            elif level == 3:
+                h3_counters[current_h2] = h3_counters.get(current_h2, 0) + 1
+                current_h3 = h3_counters[current_h2]
+                add_para_with_inline(f"（{cn(current_h3)}）{content}")
+                continue
+            elif level >= 4:
+                key = (current_h2, current_h3)
+                h4_counters[key] = h4_counters.get(key, 0) + 1
+                add_para_with_inline(f"{h4_counters[key]}. {content}")
+                continue
+
+        # 列表项
+        ul_match = ul_pattern.match(line)
+        ol_match = ol_pattern.match(line)
+        if ul_match:
+            add_para_with_inline(ul_match.group(1).strip())
+            continue
+        if ol_match:
+            add_para_with_inline(ol_match.group(1).strip())
+            continue
+
+        # 引用
+        q_match = quote_pattern.match(line)
+        if q_match:
+            add_para_with_inline(q_match.group(1).strip())
+            continue
+
+        # 普通段落
+        add_para_with_inline(line.strip())
+
+    # 如果代码块没有闭合，也把缓冲内容输出
+    if in_code_block:
+        for code_line in code_buffer:
+            if code_line.strip():
+                doc.add_paragraph(code_line)
+
+    # 如果用户给的 title 没被 # 标题覆盖，补一个标题段在开头
+    # v1.8.1: 同时加 CENTER + 大字号让 detect_para_type 稳定识别
+    if not title_added and title.strip():
+        from docx.shared import Pt
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        title_para = doc.add_paragraph()
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_run = title_para.add_run(title.strip())
+        title_run.font.size = Pt(22)
+        body = doc.element.body
+        body.remove(title_para._p)
+        body.insert(0, title_para._p)
+
+    doc.save(output_path)
+    return output_path
 
 
 # ===== 大尺寸线条图标 =====
@@ -1929,6 +2936,35 @@ class DocFormatApp:
             drop_command=self._on_file_selected
         )
         self.input_field.pack(fill='x', pady=(0, Theme.SPACE_SM))
+
+        # v1.8.0: AI 粘贴功能入口
+        paste_row = tk.Frame(file_section, bg=Theme.BG)
+        paste_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
+
+        tk.Frame(paste_row, bg=Theme.BG, width=40).pack(side='left')  # 占位对齐
+
+        paste_btn = tk.Label(
+            paste_row,
+            text="📋 没有文件？粘贴 AI 生成的文本生成 docx",
+            font=get_font(11),
+            bg=Theme.BG, fg=Theme.PRIMARY,
+            cursor='hand2', anchor='w', padx=4,
+        )
+        paste_btn.pack(side='left')
+        paste_btn.bind('<Button-1>', lambda e: self._open_paste_dialog())
+        paste_btn.bind('<Enter>', lambda e: paste_btn.configure(fg=Theme.PRIMARY_HOVER))
+        paste_btn.bind('<Leave>', lambda e: paste_btn.configure(fg=Theme.PRIMARY))
+
+        folder_row = tk.Frame(file_section, bg=Theme.BG)
+        folder_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
+        tk.Button(
+            folder_row, text='📁 选择文件夹',
+            command=self._on_select_folder,
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY,
+            font=get_font(11), relief='flat', cursor='hand2',
+            padx=Theme.SPACE_SM, pady=4,
+            borderwidth=1, highlightbackground=Theme.BORDER,
+        ).pack(side='left', padx=4)
         
         self.output_field = FileInputField(
             file_section,
@@ -2326,19 +3362,137 @@ class DocFormatApp:
             self.log_panel.log("自定义格式设置已保存", 'success')
         
         CustomSettingsDialog(self.root, on_save=on_save)
+
+    def _open_paste_dialog(self):
+        """打开粘贴文本对话框。"""
+        PasteTextDialog(self.root, on_generate=self._on_text_generated)
+
+    def _on_text_generated(self, title, body_text, output_path, is_markdown=False):
+        """粘贴对话框生成 docx 后的回调：触发主流程格式化。"""
+        import tempfile
+
+        self.log_panel.log(f"\n{'─' * 35}", 'info')
+        self.log_panel.log(f"从文本生成 docx：{title}", 'info')
+
+        # 1) 先生成临时 docx 作为 format_document 的输入
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+                temp_input = tmp.name
+            if is_markdown:
+                _create_docx_from_markdown(title, body_text, temp_input)
+                self.log_panel.log("  临时文件已生成（Markdown 格式）", 'info')
+            else:
+                _create_docx_from_text(title, body_text, temp_input)
+                self.log_panel.log("  临时文件已生成（纯文本格式）", 'info')
+        except Exception as e:
+            messagebox.showerror('生成失败', f'创建临时 docx 失败：{e}')
+            self.log_panel.log(f"  生成临时文件失败: {e}", 'error')
+            return
+
+        # 2) 设置输入输出路径，触发现有的 run_operation 流程
+        self.input_files.clear()
+        self.input_files.append(temp_input)
+        self.input_file.set(temp_input)
+        self.output_file.set(output_path)
+
+        # 显示在输入框（用更友好的名称）
+        self.input_field.filename_label.configure(
+            text=f"📋 文本生成: {title[:30]}",
+            fg=Theme.TEXT,
+        )
+        self.output_field.filename_label.configure(
+            text=Path(output_path).name,
+            fg=Theme.TEXT,
+        )
+
+        # 强制使用 smart 模式（粘贴的文本必走标点修复+格式化全流程）
+        self.operation.set('smart')
+        self._on_mode_change()
+
+        # 自动开始处理
+        self.log_panel.log("  开始格式化处理...", 'info')
+        self._pending_temp_input = temp_input
+        self.run_operation()
     
     def _on_file_selected(self, filename):
         """文件选定后的统一处理（点击选择和拖拽共用）"""
         if not filename:
             return
+        self._add_files_to_list([filename])
+
+    def _add_files_to_list(self, filenames):
+        """把一组文件加入批量处理列表，并刷新输入/输出显示。"""
+        if not filenames:
+            return
+
+        filenames = [str(p) for p in filenames]
+
+        # 用 clear+extend 原地修改，避免外部引用失效
         self.input_files.clear()
-        self.input_files.append(filename)
-        self.input_file.set(filename)
-        p = Path(filename)
-        output_name = f"{p.stem}_processed{p.suffix}"
-        self.output_file.set(str(p.parent / output_name))
-        self.log_panel.log(f"已选择: {p.name}", 'info')
+        self.input_files.extend(filenames)
+
+        first = Path(filenames[0])
+
+        if len(filenames) == 1:
+            self.input_file.set(str(filenames[0]))
+            output_name = f"{first.stem}_processed{first.suffix}"
+            self.output_file.set(str(first.parent / output_name))
+            self.log_panel.log(f"已选择: {first.name}", 'info')
+        else:
+            # 多文件：手动更新显示，输出设为第一个文件的目录
+            self.input_file.set(str(filenames[0]))
+            self.input_field.filename_label.configure(
+                text=f"已选择 {len(filenames)} 个文件  ({first.name} ...)",
+                fg=Theme.TEXT
+            )
+            self.output_file.set(str(first.parent))
+            self.output_field.filename_label.configure(
+                text=f"输出目录: {first.parent.name}",
+                fg=Theme.TEXT
+            )
+            self.log_panel.log(f"已选择 {len(filenames)} 个文件，输出目录: {first.parent}", 'info')
+
         self.result_panel.reset()
+
+    def _on_select_folder(self):
+        """选择一个文件夹，递归扫描 .doc/.docx/.wps 文件作为批量输入。"""
+        from tkinter import filedialog, messagebox
+        from pathlib import Path
+
+        folder = filedialog.askdirectory(
+            title='选择包含 Word 文档的文件夹（会递归搜索子文件夹）',
+            parent=self.root,
+        )
+        if not folder:
+            return
+
+        folder_path = Path(folder)
+        extensions = {'.docx', '.doc', '.wps'}
+        found = []
+        for p in folder_path.rglob('*'):
+            if p.is_file() and p.suffix.lower() in extensions and not p.name.startswith('~$'):
+                found.append(str(p))
+
+        found.sort(key=lambda x: x.lower())
+
+        if not found:
+            messagebox.showinfo(
+                '没找到文件',
+                f'文件夹「{folder_path.name}」下没有 Word 文档',
+                parent=self.root,
+            )
+            return
+
+        # 简单确认（防止误选大文件夹）
+        if len(found) > 30:
+            if not messagebox.askyesno(
+                '确认',
+                f'共找到 {len(found)} 个 Word 文档。是否全部加入处理列表？',
+                parent=self.root,
+            ):
+                return
+
+        self._add_files_to_list(found)
     
     def browse_input(self):
         is_windows = (os.name == 'nt')
@@ -2363,30 +3517,9 @@ class DocFormatApp:
         if not filenames:
             return
 
-        # 用 clear+extend 原地修改，避免外部引用失效
-        self.input_files.clear()
-        self.input_files.extend(filenames)
-
-        first = Path(filenames[0])
-
+        self._add_files_to_list(filenames)
         if len(filenames) == 1:
-            self._on_file_selected(str(filenames[0]))
             self.log_panel.log(f"输出格式已自动设置为: {Path(filenames[0]).suffix or '.docx'}", 'info')
-        else:
-            # 多文件：手动更新显示，输出设为第一个文件的目录
-            self.input_file.set(str(filenames[0]))
-            self.input_field.filename_label.configure(
-                text=f"已选择 {len(filenames)} 个文件  ({first.name} ...)",
-                fg=Theme.TEXT
-            )
-            self.output_file.set(str(first.parent))
-            self.output_field.filename_label.configure(
-                text=f"输出目录: {first.parent.name}",
-                fg=Theme.TEXT
-            )
-            self.log_panel.log(f"已选择 {len(filenames)} 个文件，输出目录: {first.parent}", 'info')
-
-        self.result_panel.reset()
     
     def browse_output(self):
         # 多文件模式：选择输出目录
@@ -2570,6 +3703,14 @@ class DocFormatApp:
 
         finally:
             self.root.after(0, self._reset_btn)
+            # v1.8.0: 清理粘贴文本生成的临时输入文件
+            temp_input = getattr(self, '_pending_temp_input', None)
+            if temp_input and os.path.exists(temp_input):
+                try:
+                    os.unlink(temp_input)
+                except Exception:
+                    pass
+                self._pending_temp_input = None
 
     def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False):
         """
@@ -2585,7 +3726,8 @@ class DocFormatApp:
         preset_name = self.preset.get() if hasattr(self, 'preset') else 'official'
         if preset_name == 'custom':
             try:
-                _cs = load_custom_settings()
+                _config = load_custom_settings()
+                _cs = get_active_user_preset(_config)
                 space_mode = _cs.get('space_handling', 'remove_all')
             except Exception:
                 space_mode = 'remove_all'
@@ -2765,7 +3907,8 @@ class DocFormatApp:
             bold_serial = True
             if preset_name == 'custom':
                 try:
-                    _cs = load_custom_settings()
+                    _config = load_custom_settings()
+                    _cs = get_active_user_preset(_config)
                     bold_serial = _cs.get('bold_serial', True)
                 except Exception:
                     pass
@@ -2777,7 +3920,8 @@ class DocFormatApp:
         
         if preset_name == 'custom':
             try:
-                custom = load_custom_settings()
+                _config = load_custom_settings()
+                custom = get_active_user_preset(_config)
                 preset_label = custom.get('name', '自定义格式') if custom else '自定义格式'
             except Exception:
                 preset_label = '自定义格式'

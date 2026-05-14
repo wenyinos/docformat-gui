@@ -262,14 +262,35 @@ def load_custom_preset():
     if custom_config_file.exists():
         try:
             with open(custom_config_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict) and data.get('schema_version') == 2:
+                presets = data.get('presets', [])
+                active_id = data.get('active_preset_id')
+                if active_id:
+                    for preset in presets:
+                        if preset.get('id') == active_id:
+                            return preset
+                return presets[0] if presets else None
+            return data
         except Exception:
             return None
     return None
 
+
+def _merge_preset_settings(base, overrides):
+    """递归合并预设配置，用于测试或临时覆盖少量字段。"""
+    merged = deepcopy(base)
+    for key, value in (overrides or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_preset_settings(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
 PRESETS = {
     'official': {
         'name': '公文格式',
+        'deep_clean': False,
         'page': {'top': 3.7, 'bottom': 3.5, 'left': 2.8, 'right': 2.6},
         # 主标题：二号方正小标宋简体，居中
         'title': {
@@ -363,14 +384,14 @@ PRESETS = {
             'align': 'right',
             'indent': 0,
         },
-        # 附件行：三号仿宋，格式同正文（首行缩进2字符）
+        # 附件行：三号仿宋，顶格左对齐
         'attachment': {
             'font_cn': '仿宋_GB2312',
             'font_en': 'Times New Roman',
             'size': 16,
             'bold': False,
             'align': 'justify',
-            'indent': 32,  # 同正文，首行缩进2字符
+            'indent': 0,
         },
         # 结束语（特此说明/通知等）：三号仿宋，首行缩进
         'closing': {
@@ -384,6 +405,7 @@ PRESETS = {
     },
     'academic': {
         'name': '学术论文格式',
+        'deep_clean': False,
         'page': {'top': 2.5, 'bottom': 2.5, 'left': 2.5, 'right': 2.5},
         'title': {'font_cn': '黑体', 'font_en': 'Times New Roman', 'size': 18, 'bold': True, 'align': 'center', 'indent': 0},
         'recipient': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'left', 'indent': 0},
@@ -394,11 +416,12 @@ PRESETS = {
         'body': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'justify', 'indent': 24, 'line_spacing': None},
         'signature': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'right', 'indent': 0},
         'date': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'right', 'indent': 0},
-        'attachment': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'left', 'indent': 0},
+        'attachment': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'justify', 'indent': 0},
         'closing': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 12, 'bold': False, 'align': 'left', 'indent': 24},
     },
     'legal': {
         'name': '法律文书格式',
+        'deep_clean': False,
         'page': {'top': 3.0, 'bottom': 2.5, 'left': 3.0, 'right': 2.5},
         'title': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 22, 'bold': True, 'align': 'center', 'indent': 0},
         'recipient': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'left', 'indent': 0},
@@ -409,7 +432,7 @@ PRESETS = {
         'body': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'justify', 'indent': 28, 'line_spacing': None},
         'signature': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'right', 'indent': 0},
         'date': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'right', 'indent': 0},
-        'attachment': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'left', 'indent': 0},
+        'attachment': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'justify', 'indent': 0},
         'closing': {'font_cn': '宋体', 'font_en': 'Times New Roman', 'size': 14, 'bold': False, 'align': 'left', 'indent': 28},
     },
 }
@@ -803,6 +826,13 @@ def detect_para_type(text, index, total, alignment, all_texts, all_texts_index=N
     if is_in_tail:
         if _is_date_text(text, date_patterns):
             return 'date'
+
+    # ===== 附件块延续识别（v1.8.1 新增）=====
+    # 一旦上一段是 attachment，且当前段以 "N." 或 "N、" 开头，
+    # 当前段也归入 attachment，避免被 heading3/body 抢走。
+    if prev_para_type == 'attachment':
+        if re.match(r'^\s*\d{1,2}[.、]\s*\S', text):
+            return 'attachment'
     
     # ===== 一级标题："一、" "二、" 等 =====
     if re.match(r'^[一二三四五六七八九十]+、', text):
@@ -1152,6 +1182,53 @@ def _force_normal_style(para):
         pass
 
 
+def deep_clean_document(doc):
+    """深度清洗文档：移除所有段落级用户格式属性，保留文字和结构。
+
+    v1.8.0: 处理 AI 粘贴的脏数据时，原文带的颜色、字号、缩进、段前段后
+    等用户级格式会干扰 detect_para_type 的启发式判断。本函数把这些
+    属性全部清掉，让后续格式化工作在干净的输入上展开。
+
+    注意：本函数不删除文字、不动表格结构。
+    """
+
+    def _clean_paragraph(para):
+        pf = para.paragraph_format
+        # 段落级属性清零
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        pf.left_indent = None
+        pf.right_indent = None
+        pf.first_line_indent = None
+        # 行距交给后面的格式化处理，这里先清掉
+        pf.line_spacing = None
+        pf.line_spacing_rule = None
+
+        # 强制 style 为 Normal（避免 Heading 样式继承）
+        _force_normal_style(para)
+
+        # Run 级属性清零
+        for run in para.runs:
+            run.font.color.rgb = None
+            run.font.highlight_color = None
+            # size / bold / italic 等让后面 set_font 来重置
+            run.font.size = None
+            run.font.bold = None
+            run.font.italic = None
+            run.font.underline = None
+            run.font.strike = None
+
+    for para in doc.paragraphs:
+        _clean_paragraph(para)
+
+    # 表格内段落同样清洗
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    _clean_paragraph(para)
+
+
 def _strip_autospacing_from_styles(doc):
     """清理整个文档样式表里的 beforeAutospacing/afterAutospacing 属性。
 
@@ -1286,25 +1363,19 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
     pf.left_indent = Pt(0)
     pf.right_indent = Pt(0)
     
-    # 首行缩进
-    indent = fmt.get('indent', 0)
-    if indent > 0:
-        pf.first_line_indent = Pt(indent)
-        # 同时设置 w:firstLineChars 让 Word 显示为"X 字符"而非厘米
-        # w:firstLineChars 单位是 1/100 字符，2字符 = 200
-        size = fmt.get('size', 16) or 16
-        try:
-            chars_100 = int(round(indent / size * 100))
-            pPr = para._p.get_or_add_pPr()
-            ind = pPr.find(qn('w:ind'))
-            if ind is None:
-                ind = OxmlElement('w:ind')
-                pPr.append(ind)
-            ind.set(qn('w:firstLineChars'), str(chars_100))
-        except Exception:
-            pass
-    else:
-        pf.first_line_indent = Pt(0)
+    # v1.8.1: attachment 类型走悬挂缩进，不走通用缩进逻辑
+    if para_type == 'attachment':
+        font_size_pt = fmt.get('size', 16) or 16
+        # 左缩进 5 字符（首段折行后的对齐位置，后续段的左边界）
+        pf.left_indent = Pt(font_size_pt * 5)
+
+        # 是否是"首段"（含"附件"关键字）—— 走悬挂缩进
+        if '附件' in para.text:
+            pf.first_line_indent = Pt(-font_size_pt * 3)
+        else:
+            # 后续 "2.xxx" "3.xxx" —— 顶左缩进（first_line_indent = 0）
+            pf.first_line_indent = Pt(0)
+
         try:
             pPr = para._p.get_or_add_pPr()
             ind = pPr.find(qn('w:ind'))
@@ -1312,6 +1383,37 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
                 ind.attrib.pop(qn('w:firstLineChars'), None)
         except Exception:
             pass
+        _attachment_indent_done = True
+    else:
+        _attachment_indent_done = False
+
+    # 首行缩进
+    if not _attachment_indent_done:
+        indent = fmt.get('indent', 0)
+        if indent > 0:
+            pf.first_line_indent = Pt(indent)
+            # 同时设置 w:firstLineChars 让 Word 显示为"X 字符"而非厘米
+            # w:firstLineChars 单位是 1/100 字符，2字符 = 200
+            size = fmt.get('size', 16) or 16
+            try:
+                chars_100 = int(round(indent / size * 100))
+                pPr = para._p.get_or_add_pPr()
+                ind = pPr.find(qn('w:ind'))
+                if ind is None:
+                    ind = OxmlElement('w:ind')
+                    pPr.append(ind)
+                ind.set(qn('w:firstLineChars'), str(chars_100))
+            except Exception:
+                pass
+        else:
+            pf.first_line_indent = Pt(0)
+            try:
+                pPr = para._p.get_or_add_pPr()
+                ind = pPr.find(qn('w:ind'))
+                if ind is not None:
+                    ind.attrib.pop(qn('w:firstLineChars'), None)
+            except Exception:
+                pass
     
     # 行距：优先读取当前元素自身的 line_spacing，否则用全局默认值
     ls = fmt.get('line_spacing', line_spacing_pt)
@@ -1479,7 +1581,7 @@ def add_page_number(doc, font_name="宋体", footer_distance=0.7):
         _build_footer_line(even_footer, WD_ALIGN_PARAGRAPH.LEFT, pad_fullwidth=False)
 
 
-def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False, bold_serial=True):
+def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False, bold_serial=True, custom_settings=None):
     """格式化文档
     
     Args:
@@ -1502,6 +1604,9 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     else:
         preset = PRESETS[preset_name]
         logger.info(f'Preset: {preset["name"]}')
+
+    if custom_settings:
+        preset = _merge_preset_settings(preset, custom_settings)
     
     logger.info(f'Input: {input_path}')
     preset = _adapt_fonts_for_platform(preset)
@@ -1513,6 +1618,10 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     bold_serial = preset.get('bold_serial', bold_serial)
     
     doc = Document(input_path)
+
+    # v1.8.0: 强力清洗模式（如开启，在格式化前先深度清理段落属性）
+    if preset.get('deep_clean', False):
+        deep_clean_document(doc)
 
     # 将“标题+标点+正文”拆分为标题段+正文段
     # v1.7.1：默认关闭，避免破坏用户故意写成一行的合法格式（如
