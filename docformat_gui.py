@@ -9,6 +9,7 @@ import sys
 import threading
 import re
 import uuid
+import logging
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
@@ -20,15 +21,28 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from scripts.analyzer import analyze_punctuation, analyze_numbering, analyze_paragraph_format, analyze_font
 from scripts.punctuation import process_document as fix_punctuation
 from scripts.formatter import format_document, PRESETS
+from scripts import ai_config
+from scripts.ai_checker import check_document as ai_check_document, annotate_document as ai_annotate_document
+
+
+def _should_enable_drag_drop():
+    """判断当前运行环境是否启用文件拖拽。"""
+    if os.environ.get('DOCFORMAT_DISABLE_DND') == '1':
+        return False
+    # v1.8.1: macOS 打包版先禁用 tkdnd，优先保证 .app/.dmg 可正常打开。
+    # 源码运行仍可用拖拽，后续待打包稳定后再恢复。
+    if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
+        return False
+    return True
 
 # 拖拽支持（可选，没有安装时自动降级）
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES, COPY
-    _DND_AVAILABLE = True
+    _DND_AVAILABLE = _should_enable_drag_drop()
 except ImportError:
     _DND_AVAILABLE = False
 
-__version__ = '1.8.1'
+__version__ = '1.8.2'
 
 def _open_file(path):
     """跨平台打开文件"""
@@ -98,6 +112,32 @@ def get_font(size=12, weight='normal'):
 # ===== 配置管理 =====
 import json
 
+def _migrate_legacy_config(config_dir):
+    """把旧版放在 exe 同目录的配置迁移到新的用户目录。
+
+    仅当新目录还没有配置、且旧目录确实存在配置时才迁移，保证现有用户升级后不丢设置。
+    迁移失败不应阻止程序启动。
+    """
+    try:
+        import shutil
+        new_file = Path(config_dir) / "custom_settings.json"
+        if new_file.exists():
+            return
+        legacy_dir = Path(sys.executable).parent
+        legacy_file = legacy_dir / "custom_settings.json"
+        if not legacy_file.exists():
+            return
+        if legacy_file.resolve() == new_file.resolve():
+            return
+        shutil.copy2(legacy_file, new_file)
+        # 一并迁移备份文件（如果有）
+        legacy_bak = legacy_file.with_suffix('.json.v1bak')
+        if legacy_bak.exists():
+            shutil.copy2(legacy_bak, new_file.with_suffix('.json.v1bak'))
+    except Exception:
+        pass
+
+
 def _get_config_dir():
     """获取配置文件存放目录（确保可写）"""
     if not getattr(sys, 'frozen', False):
@@ -107,11 +147,25 @@ def _get_config_dir():
     if sys.platform == 'darwin':
         # macOS 打包后：.app 包内部只读，配置文件放到用户目录
         config_dir = Path.home() / 'Library' / 'Application Support' / 'DocFormatter'
-        config_dir.mkdir(parents=True, exist_ok=True)
-        return config_dir
+    elif sys.platform == 'win32':
+        # Windows 打包后：写到 %APPDATA%。
+        # 不再写在 exe 同目录——一旦程序被装进 Program Files 等只读位置，
+        # 写配置就会失败，逼用户以管理员身份运行；而管理员模式下系统会拦截
+        # 普通权限程序（资源管理器）拖来的文件，导致拖拽功能失效。
+        base = os.environ.get('APPDATA') or str(Path.home() / 'AppData' / 'Roaming')
+        config_dir = Path(base) / 'DocFormatter'
     else:
-        # Windows / Linux 打包后：exe 旁边（通常可写）
-        return Path(sys.executable).parent
+        # Linux 打包后：遵循 XDG 规范，避免同样的只读目录 / 权限问题
+        base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+        config_dir = Path(base) / 'DocFormatter'
+
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # 极端情况下用户目录不可写，退回到 exe 同目录，至少不致崩溃
+        config_dir = Path(sys.executable).parent
+    _migrate_legacy_config(config_dir)
+    return config_dir
 
 CONFIG_FILE = _get_config_dir() / "custom_settings.json"
 
@@ -2263,6 +2317,16 @@ class Icons:
         # 笔头
         canvas.create_line(x+s*0.7, y+s*0.3, x+s*0.8, y+s*0.2, fill=color, width=lw, capstyle='round')
         canvas.create_line(x+s*0.75, y+s*0.35, x+s*0.85, y+s*0.25, fill=color, width=lw, capstyle='round')
+
+    @staticmethod
+    def draw_ai(canvas, x, y, size=48, color='#2E2E2E'):
+        """AI 检查 - 对话气泡"""
+        s = size
+        lw = 2.5
+        canvas.create_oval(x+s*0.12, y+s*0.18, x+s*0.88, y+s*0.72, outline=color, width=lw)
+        canvas.create_line(x+s*0.35, y+s*0.72, x+s*0.24, y+s*0.88, fill=color, width=lw, capstyle='round')
+        canvas.create_line(x+s*0.26, y+s*0.46, x+s*0.74, y+s*0.46, fill=color, width=lw, capstyle='round')
+        canvas.create_line(x+s*0.36, y+s*0.58, x+s*0.64, y+s*0.58, fill=color, width=lw, capstyle='round')
     
     @staticmethod
     def draw_file(canvas, x, y, size=48, color='#2E2E2E'):
@@ -2856,6 +2920,180 @@ class ResultPanel(tk.Frame):
         ).pack(fill='x', anchor='w')
         
         self.result_card.pack(fill='x', pady=(Theme.SPACE_MD, 0))
+
+    def show_ai_results(self, ai_result, annotate_stats, output_path, title="AI 逻辑检查报告", extra_message=None):
+        self.placeholder.pack_forget()
+
+        for widget in self.result_content.winfo_children():
+            widget.destroy()
+
+        issues = ai_result.get('issues', [])
+        total_chunks = ai_result.get('total_chunks', 0)
+        failed_chunks = ai_result.get('failed_chunks', 0)
+
+        tk.Label(
+            self.result_content,
+            text=title,
+            font=get_font(15, 'bold'),
+            bg=Theme.CARD,
+            fg=Theme.TEXT,
+            anchor='w'
+        ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_SM))
+
+        if extra_message:
+            tk.Label(
+                self.result_content,
+                text=extra_message,
+                font=get_font(12, 'bold'),
+                bg=Theme.CARD,
+                fg=Theme.TEXT,
+                anchor='w',
+                justify='left',
+                wraplength=620
+            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_SM))
+
+        if annotate_stats.get('inline', 0) > 0:
+            hint = (
+                "AI 检查结果仅供参考，可能有误报或漏报，请务必人工复核。"
+                "可插入批注的段落正文未被修改，问题以批注形式标注；"
+                "部分段落因无法插入批注，已用红色内联提示标注。"
+            )
+        else:
+            hint = (
+                "AI 检查结果仅供参考，可能有误报或漏报，请务必人工复核。"
+                "正文未被修改，问题以批注形式标注。"
+            )
+        tk.Label(
+            self.result_content,
+            text=hint,
+            font=get_font(11),
+            bg=Theme.CARD,
+            fg=Theme.LOG_WARNING,
+            anchor='w',
+            justify='left',
+            wraplength=620
+        ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
+
+        if total_chunks and failed_chunks == total_chunks:
+            tk.Label(
+                self.result_content,
+                text="AI 检查未成功完成（全部分段失败），本次结果不可信，请检查网络后重试",
+                font=get_font(12, 'bold'),
+                bg=Theme.CARD,
+                fg=Theme.LOG_ERROR,
+                anchor='w',
+                justify='left',
+                wraplength=620
+            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
+        elif failed_chunks > 0:
+            tk.Label(
+                self.result_content,
+                text=f"有 {failed_chunks}/{total_chunks} 个分段检查失败，结果可能不完整，请重试",
+                font=get_font(12, 'bold'),
+                bg=Theme.CARD,
+                fg=Theme.LOG_WARNING,
+                anchor='w',
+                justify='left',
+                wraplength=620
+            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
+
+        grouped = {
+            '病句': [],
+            '逻辑': [],
+            '其他': [],
+        }
+        for issue in issues:
+            category = issue.get('category', '其他')
+            if category not in grouped:
+                category = '其他'
+            grouped[category].append(issue)
+
+        total = len(issues)
+        if total == 0 and not (total_chunks and failed_chunks == total_chunks):
+            tk.Label(
+                self.result_content,
+                text="未发现明显病句或逻辑问题",
+                font=get_font(13, 'bold'),
+                bg=Theme.CARD,
+                fg=Theme.LOG_SUCCESS,
+                anchor='w'
+            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
+        elif total == 0:
+            tk.Label(
+                self.result_content,
+                text="未获得可信 AI 检查结果",
+                font=get_font(13, 'bold'),
+                bg=Theme.CARD,
+                fg=Theme.LOG_ERROR,
+                anchor='w'
+            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
+        else:
+            for category in ('病句', '逻辑', '其他'):
+                category_issues = grouped[category]
+                if not category_issues:
+                    continue
+
+                tk.Label(
+                    self.result_content,
+                    text=f"{category}（{len(category_issues)}处）",
+                    font=get_font(12, 'bold'),
+                    bg=Theme.CARD,
+                    fg=Theme.TEXT,
+                    anchor='w'
+                ).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 2))
+
+                for issue in category_issues[:8]:
+                    para = issue.get('para', '?')
+                    message = issue.get('message', '')
+                    tk.Label(
+                        self.result_content,
+                        text=f"第{para}段：{message}",
+                        font=get_font(11),
+                        bg=Theme.CARD,
+                        fg=Theme.TEXT_SECONDARY,
+                        anchor='w',
+                        justify='left',
+                        wraplength=620
+                    ).pack(fill='x', anchor='w', pady=1)
+
+                if len(category_issues) > 8:
+                    tk.Label(
+                        self.result_content,
+                        text=f"……另有 {len(category_issues) - 8} 条，请在 Word 批注中查看",
+                        font=get_font(11),
+                        bg=Theme.CARD,
+                        fg=Theme.TEXT_MUTED,
+                        anchor='w'
+                    ).pack(fill='x', anchor='w', pady=1)
+
+        tk.Frame(self.result_content, bg=Theme.BORDER, height=1).pack(fill='x', pady=Theme.SPACE_MD)
+
+        tk.Label(
+            self.result_content,
+            text=(
+                f"已标注 {annotate_stats.get('annotated', 0)} 条"
+                f"（批注 {annotate_stats.get('comment', 0)} 条，"
+                f"内联 {annotate_stats.get('inline', 0)} 条，"
+                f"跳过 {annotate_stats.get('skipped', 0)} 条）"
+            ),
+            font=get_font(12),
+            bg=Theme.CARD,
+            fg=Theme.TEXT,
+            anchor='w'
+        ).pack(fill='x', anchor='w')
+
+        tk.Label(
+            self.result_content,
+            text=f"输出文件：{output_path}",
+            font=get_font(11),
+            bg=Theme.CARD,
+            fg=Theme.TEXT_SECONDARY,
+            anchor='w',
+            justify='left',
+            wraplength=620
+        ).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 0))
+
+        self.result_card.pack(fill='x', pady=(Theme.SPACE_MD, 0))
     
     def reset(self):
         self.result_card.pack_forget()
@@ -2994,6 +3232,22 @@ class DocFormatApp:
             command=self._on_mode_change
         )
         smart_card.pack(fill='x', pady=(0, Theme.SPACE_MD))
+
+        self.ai_with_format_var = tk.BooleanVar(value=False)
+        if ai_config.is_ai_ui_enabled():
+            self.ai_with_format_cb = tk.Checkbutton(
+                mode_section,
+                text="同时进行 AI 逻辑检查（实验性）",
+                variable=self.ai_with_format_var,
+                font=get_font(11),
+                bg=Theme.BG,
+                fg=Theme.TEXT_SECONDARY,
+                activebackground=Theme.BG,
+                selectcolor=Theme.CARD,
+                cursor='hand2',
+                padx=6,
+            )
+            self.ai_with_format_cb.pack(anchor='w', pady=(0, Theme.SPACE_MD))
         
         # 两个小卡片
         small_cards = tk.Frame(mode_section, bg=Theme.BG)
@@ -3022,6 +3276,18 @@ class DocFormatApp:
             command=self._on_mode_change
         )
         punct_card.grid(row=0, column=1, sticky='nsew')
+
+        if ai_config.is_ai_ui_enabled():
+            ai_card = SelectableCard(
+                small_cards,
+                title="AI 逻辑检查",
+                description="检查明显病句和逻辑矛盾，并写入 Word 批注",
+                value="ai_check",
+                variable=self.operation,
+                icon_draw_func=Icons.draw_ai,
+                command=self._on_mode_change
+            )
+            ai_card.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(Theme.SPACE_SM, 0))
         
         # ===== 4. 格式预设 =====
         preset_section = tk.Frame(content, bg=Theme.BG)
@@ -3308,6 +3574,13 @@ class DocFormatApp:
             else:
                 self.revision_mode_var.set(False)
                 self.revision_cb.configure(state='disabled', fg=Theme.TEXT_MUTED)
+        if hasattr(self, 'ai_with_format_cb'):
+            ai_enabled = mode == 'smart' and ai_config.is_ai_ui_enabled() and ai_config.is_ai_available()
+            if ai_enabled:
+                self.ai_with_format_cb.configure(state='normal', fg=Theme.TEXT_SECONDARY)
+            else:
+                self.ai_with_format_var.set(False)
+                self.ai_with_format_cb.configure(state='disabled', fg=Theme.TEXT_MUTED)
 
     def _show_revision_info(self, event):
         """弹出修订标记说明小窗"""
@@ -3593,13 +3866,42 @@ class DocFormatApp:
                     )
                     return
 
-        if mode != 'analyze' and not output_base:
+        if mode == 'ai_check' and not ai_config.is_ai_ui_enabled():
+            messagebox.showwarning(
+                "实验功能未启用",
+                "AI 检查仍处于实验阶段，v1.8.2 稳定版默认隐藏该入口。"
+            )
+            return
+
+        if mode == 'ai_check' and not ai_config.is_ai_available():
+            cfg_path = ai_config.get_config_file_path()
+            messagebox.showwarning(
+                "AI 服务未配置",
+                f"未配置 AI 服务，暂不可用。\n\n请在以下文件中填写 api_key，或开启 use_fake 测试流程：\n{cfg_path}"
+            )
+            return
+
+        if (
+            mode == 'smart'
+            and getattr(self, 'ai_with_format_var', None) is not None
+            and self.ai_with_format_var.get()
+            and (not ai_config.is_ai_ui_enabled() or not ai_config.is_ai_available())
+        ):
+            cfg_path = ai_config.get_config_file_path()
+            messagebox.showwarning(
+                "AI 服务未配置",
+                f"AI 实验功能未启用或服务未配置，暂不可用。\n\n如需内测，请先启用实验开关并配置：\n{cfg_path}"
+            )
+            return
+
+        if mode not in ('analyze', 'ai_check') and not output_base:
             messagebox.showerror("提示", "请指定输出文件或目录")
             return
 
-        # 诊断模式仅支持单文件
-        if mode == 'analyze' and len(input_paths) > 1:
-            messagebox.showwarning("提示", "诊断模式每次仅处理一个文件，将只分析第一个文件。")
+        # 诊断和 AI 检查模式仅支持单文件
+        if mode in ('analyze', 'ai_check') and len(input_paths) > 1:
+            mode_name = "AI 检查" if mode == 'ai_check' else "诊断"
+            messagebox.showwarning("提示", f"{mode_name}模式每次仅处理一个文件，将只分析第一个文件。")
             input_paths = input_paths[:1]
 
         self.run_btn.configure(bg=Theme.TEXT_MUTED)
@@ -3607,13 +3909,19 @@ class DocFormatApp:
         self._show_progress()
 
         rev_mode = self.revision_mode_var.get() if hasattr(self, 'revision_mode_var') else False
+        ai_with_format = (
+            mode == 'smart'
+            and ai_config.is_ai_ui_enabled()
+            and hasattr(self, 'ai_with_format_var')
+            and self.ai_with_format_var.get()
+        )
         thread = threading.Thread(
             target=self._do_operation,
-            args=(input_paths, output_base, mode, rev_mode)
+            args=(input_paths, output_base, mode, rev_mode, ai_with_format)
         )
         thread.start()
     
-    def _do_operation(self, input_paths, output_base, mode, revision_mode=False):
+    def _do_operation(self, input_paths, output_base, mode, revision_mode=False, ai_with_format=False):
         """批量调度器：循环处理每个文件，汇总结果。"""
         total = len(input_paths)
         success_paths = []
@@ -3649,7 +3957,8 @@ class DocFormatApp:
                 try:
                     actual_out, summary = self._process_single_file(
                         input_path, out_path, mode, progress_fn,
-                        revision_mode=revision_mode
+                        revision_mode=revision_mode,
+                        ai_with_format=ai_with_format
                     )
                     success_paths.append(actual_out)
                     self.log_panel.log(
@@ -3661,8 +3970,20 @@ class DocFormatApp:
 
             self._update_progress(100, 100, '完成')
 
-            if mode == 'analyze':
-                pass
+            if mode in ('analyze', 'ai_check') or (mode == 'smart' and ai_with_format):
+                if failed_files:
+                    name, err = failed_files[0]
+                    self.root.after(0, lambda n=name, e=err: messagebox.showerror(
+                        "处理失败", f"{n}\n\n{e}"
+                    ))
+                elif mode == 'smart' and ai_with_format and success_paths:
+                    fp = success_paths[0]
+                    self.root.after(0, lambda p=fp: messagebox.showinfo(
+                        "完成", f"文件已保存至:\n{p}"
+                    ))
+                    if self.auto_open_var.get():
+                        self.root.after(100, lambda p=fp: _open_file(p))
+                    self.log_panel.log("全部完成", 'success')
             elif failed_files:
                 summary = "\n".join(f"  • {n}: {e}" for n, e in failed_files)
                 self.log_panel.log(
@@ -3712,7 +4033,7 @@ class DocFormatApp:
                     pass
                 self._pending_temp_input = None
 
-    def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False):
+    def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False, ai_with_format=False):
         """
         处理单个文件。
         progress_fn(pct: int, text: str) 由调用方传入，负责映射到全局进度条。
@@ -3721,6 +4042,11 @@ class DocFormatApp:
         """
         temp_docx = None
         temp_output_docx = None
+        original_input_path = input_path
+        ai_panel_result = None
+        ai_panel_stats = None
+        ai_panel_extra = None
+        ai_panel_error = None
 
         # 确定空格处理模式
         preset_name = self.preset.get() if hasattr(self, 'preset') else 'official'
@@ -3751,6 +4077,10 @@ class DocFormatApp:
                 input_path = temp_docx
                 self.log_panel.log("转换成功", 'success')
 
+            if mode == 'ai_check':
+                original = Path(original_input_path)
+                output_path = str(original.with_name(f"{original.stem}_AI批注.docx"))
+
             output_ext = Path(output_path).suffix.lower()
             needs_convert_back = output_ext in ('.doc', '.wps')
             if needs_convert_back:
@@ -3774,6 +4104,45 @@ class DocFormatApp:
                 self.root.after(0, lambda: self.result_panel.show_diagnosis(results))
                 self.log_panel.log("诊断完成", 'success')
 
+            elif mode == 'ai_check':
+                progress_fn(5, '正在读取文档...')
+                doc = Document(input_path)
+
+                class _AILogHandler(logging.Handler):
+                    def emit(handler_self, record):
+                        self.log_panel.log(handler_self.format(record), 'warning')
+
+                ai_logger = logging.getLogger('docformat.ai_checker')
+                handler = _AILogHandler()
+                handler.setFormatter(logging.Formatter('%(message)s'))
+                ai_logger.addHandler(handler)
+                ai_logger.setLevel(logging.INFO)
+
+                try:
+                    def ai_progress(pct, text):
+                        progress_fn(5 + int(pct * 70 / 100), text)
+
+                    self.log_panel.log("正在进行 AI 逻辑检查...", 'info')
+                    ai_result = ai_check_document(doc, progress_fn=ai_progress)
+                    issues = ai_result["issues"]
+
+                    progress_fn(80, '正在写入 Word 批注...')
+                    annotate_stats = ai_annotate_document(doc, issues)
+                    doc.save(output_path_docx)
+
+                    progress_fn(100, 'AI 检查完成')
+                    self.root.after(
+                        0,
+                        lambda result=ai_result, stats=annotate_stats, out=output_path_docx:
+                            self.result_panel.show_ai_results(result, stats, out)
+                    )
+                    self.log_panel.log(
+                        f"AI 检查完成，发现 {len(issues)} 条，已保存: {Path(output_path_docx).name}",
+                        'success'
+                    )
+                finally:
+                    ai_logger.removeHandler(handler)
+
             elif mode == 'punctuation':
                 progress_fn(10, '修复标点...')
                 self._run_punctuation(input_path, output_path_docx, space_mode=space_mode)
@@ -3790,11 +4159,76 @@ class DocFormatApp:
                 progress_fn(5, '步骤 2/2: 应用格式...')
 
                 def scaled_progress(pct, total, text):
-                    progress_fn(5 + int(pct * 90 / 100), text)
+                    if ai_with_format:
+                        progress_fn(5 + int(pct * 65 / 100), text)
+                    else:
+                        progress_fn(5 + int(pct * 90 / 100), text)
                 para_stats = self._run_format(temp_path, output_path_docx,
                                  progress_callback=scaled_progress,
                                  revision_mode=revision_mode)
                 os.unlink(temp_path)
+
+                if ai_with_format:
+                    if needs_convert_back:
+                        self.log_panel.log("提示：批注仅在 .docx 中保留，转换为 .doc/.wps 后可能丢失批注。", 'warning')
+
+                    try:
+                        self.log_panel.log("步骤 3/3: AI 逻辑检查并写入批注...", 'info')
+                        progress_fn(70, '步骤 3/3: 读取排版后的文档...')
+                        formatted_doc = Document(output_path_docx)
+
+                        class _AILogHandler(logging.Handler):
+                            def emit(handler_self, record):
+                                self.log_panel.log(handler_self.format(record), 'warning')
+
+                        ai_logger = logging.getLogger('docformat.ai_checker')
+                        handler = _AILogHandler()
+                        handler.setFormatter(logging.Formatter('%(message)s'))
+                        ai_logger.addHandler(handler)
+                        ai_logger.setLevel(logging.INFO)
+
+                        try:
+                            def smart_ai_progress(pct, text):
+                                progress_fn(70 + int(pct * 22 / 100), text)
+
+                            ai_result = ai_check_document(formatted_doc, progress_fn=smart_ai_progress)
+                            issues = ai_result["issues"]
+
+                            progress_fn(92, '正在写入 AI 批注...')
+                            annotate_stats = ai_annotate_document(formatted_doc, issues)
+                            formatted_doc.save(output_path_docx)
+                            progress_fn(100, '格式处理和 AI 检查完成')
+
+                            if ai_result["total_chunks"] and ai_result["failed_chunks"] == ai_result["total_chunks"]:
+                                extra_message = "排版已完成，但 AI 检查未成功完成，未写入可信批注。"
+                            elif annotate_stats.get("annotated", 0) > 0:
+                                extra_message = "该文件已完成格式处理并已标注 AI 批注。"
+                            else:
+                                extra_message = "该文件已完成格式处理；AI 未发现可标注问题。"
+
+                            ai_panel_result = ai_result
+                            ai_panel_stats = annotate_stats
+                            ai_panel_extra = extra_message
+
+                            if ai_result["total_chunks"] and ai_result["failed_chunks"] == ai_result["total_chunks"]:
+                                self.log_panel.log(
+                                    "排版已完成，但 AI 检查全部分段失败，请检查网络后重试。",
+                                    'error'
+                                )
+                            else:
+                                self.log_panel.log(
+                                    f"格式处理完成，AI 发现 {len(issues)} 条，已标注到同一输出文件。",
+                                    'success'
+                                )
+                        finally:
+                            ai_logger.removeHandler(handler)
+                    except Exception as e:
+                        progress_fn(100, '格式处理完成，AI 检查失败')
+                        self.log_panel.log(
+                            f"排版已完成，但 AI 检查失败，已保留排版文件: {e}",
+                            'error'
+                        )
+                        ai_panel_error = str(e)
 
             if mode != 'analyze' and needs_convert_back:
                 from scripts.converter import convert_from_docx
@@ -3828,6 +4262,24 @@ class DocFormatApp:
                             os.unlink(output_path_docx)
                         except Exception:
                             pass
+
+            if mode == 'smart' and ai_with_format:
+                if ai_panel_result is not None:
+                    self.root.after(
+                        0,
+                        lambda result=ai_panel_result, stats=ai_panel_stats, out=output_path, msg=ai_panel_extra:
+                            self.result_panel.show_ai_results(
+                                result,
+                                stats,
+                                out,
+                                title="智能处理 + AI 逻辑检查报告",
+                                extra_message=msg
+                            )
+                    )
+                elif ai_panel_error is not None:
+                    self.root.after(0, lambda out=output_path, err=ai_panel_error: self.result_panel.show_success(
+                        "排版已完成，AI 检查失败", f"{Path(out).name}\nAI 错误：{err}"
+                    ))
 
             return output_path, None
 
@@ -3931,6 +4383,7 @@ class DocFormatApp:
 
 
 def main():
+    global _DND_AVAILABLE
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
@@ -3938,8 +4391,17 @@ def main():
         pass
     
     if _DND_AVAILABLE:
-        root = TkinterDnD.Tk()
+        try:
+            root = TkinterDnD.Tk()
+        except Exception as e:
+            # 某些打包环境下 python 模块可导入，但 tkdnd 运行库实际缺失。
+            # 这里自动降级到普通 Tk，保证程序至少能启动使用。
+            print(f"[警告] 拖拽运行库加载失败，已降级为普通模式: {e}")
+            _DND_AVAILABLE = False
+            root = tk.Tk()
     else:
+        if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
+            print("[信息] macOS 打包版当前默认关闭拖拽功能，以优先保证应用可正常启动。")
         root = tk.Tk()
     app = DocFormatApp(root)
     root.mainloop()
