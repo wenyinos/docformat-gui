@@ -42,7 +42,7 @@ try:
 except ImportError:
     _DND_AVAILABLE = False
 
-__version__ = '1.8.2'
+__version__ = '1.8.4'
 
 def _open_file(path):
     """跨平台打开文件"""
