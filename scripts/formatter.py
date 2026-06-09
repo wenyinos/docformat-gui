@@ -22,6 +22,7 @@
 """
 
 import sys
+import os
 import json
 import re
 import logging
@@ -251,14 +252,19 @@ def _adapt_fonts_for_platform(preset):
 # 自定义配置文件路径
 def load_custom_preset():
     """加载自定义预设"""
-    if getattr(sys, 'frozen', False):
-        if sys.platform == 'darwin':
-            # macOS 打包后：与 GUI 保持一致，从用户目录读取
-            custom_config_file = Path.home() / 'Library' / 'Application Support' / 'DocFormatter' / "custom_settings.json"
-        else:
-            custom_config_file = Path(sys.executable).parent / "custom_settings.json"
+    if sys.platform == 'darwin':
+        custom_config_file = Path.home() / 'Library' / 'Application Support' / 'DocFormatter' / "custom_settings.json"
+    elif sys.platform == 'win32':
+        base = os.environ.get('APPDATA') or str(Path.home() / 'AppData' / 'Roaming')
+        custom_config_file = Path(base) / 'DocFormatter' / "custom_settings.json"
     else:
-        custom_config_file = Path(__file__).parent.parent / "custom_settings.json"
+        base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
+        custom_config_file = Path(base) / 'DocFormatter' / "custom_settings.json"
+
+    legacy_config_file = Path(__file__).parent.parent / "custom_settings.json"
+    if not custom_config_file.exists() and legacy_config_file.exists():
+        custom_config_file = legacy_config_file
+
     if custom_config_file.exists():
         try:
             with open(custom_config_file, 'r', encoding='utf-8') as f:
@@ -1590,7 +1596,10 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     _revision_counter[0] = 0   # 每篇文档从 1 开始计 ID
 
     # 处理自定义预设
-    if preset_name == 'custom':
+    if preset_name == 'custom' and custom_settings:
+        preset = deepcopy(custom_settings)
+        logger.info(f'Preset: {preset.get("name", "自定义格式")}')
+    elif preset_name == 'custom':
         preset = load_custom_preset()
         if preset is None:
             logger.warning('Custom preset not found, using official preset')
@@ -1605,7 +1614,7 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
         preset = PRESETS[preset_name]
         logger.info(f'Preset: {preset["name"]}')
 
-    if custom_settings:
+    if custom_settings and preset_name != 'custom':
         preset = _merge_preset_settings(preset, custom_settings)
     
     logger.info(f'Input: {input_path}')

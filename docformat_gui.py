@@ -140,10 +140,6 @@ def _migrate_legacy_config(config_dir):
 
 def _get_config_dir():
     """获取配置文件存放目录（确保可写）"""
-    if not getattr(sys, 'frozen', False):
-        # 开发环境，放在脚本旁边
-        return Path(__file__).parent
-
     if sys.platform == 'darwin':
         # macOS 打包后：.app 包内部只读，配置文件放到用户目录
         config_dir = Path.home() / 'Library' / 'Application Support' / 'DocFormatter'
@@ -310,33 +306,6 @@ def _make_empty_config():
     }
 
 
-def load_custom_settings():
-    """加载用户配置文件。
-    
-    v1.8.0: 引入 schema_version。老格式（顶级是 settings dict）会被
-    自动迁移到新格式（顶级有 schema_version + presets 列表）。
-    """
-    if not CONFIG_FILE.exists():
-        return _make_empty_config()
-    
-    try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        print(f"[警告] 配置文件读取失败，使用默认: {e}")
-        return _make_empty_config()
-    
-    # 已经是新 schema：直接返回
-    if isinstance(data, dict) and data.get('schema_version') == CONFIG_SCHEMA_VERSION:
-        # 防御性检查：presets 字段必须存在且非空
-        if not data.get('presets'):
-            data['presets'] = [_make_default_user_preset()]
-        return data
-    
-    # 老 schema 迁移
-    return _migrate_legacy_config(data)
-
-
 def _migrate_legacy_config(legacy_data):
     """把 v1.7.x 及更早的老格式配置迁移成 v1.8.0+ 的新 schema。"""
     import copy
@@ -378,6 +347,43 @@ def _merge_settings(defaults, custom):
     return merged
 
 
+def load_custom_settings():
+    """加载用户自定义设置，并修复旧配置缺失的 active preset。"""
+    if not CONFIG_FILE.exists():
+        config = _make_empty_config()
+    else:
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"[警告] 配置文件读取失败，使用默认: {e}")
+            data = None
+
+        if isinstance(data, dict) and data.get('schema_version') == CONFIG_SCHEMA_VERSION:
+            config = dict(data)
+        else:
+            config = _migrate_legacy_config(data)
+
+    presets = config.get('presets') or []
+    if not presets:
+        presets = [_make_default_user_preset()]
+
+    merged_presets = []
+    for preset in presets:
+        merged = _merge_settings(DEFAULT_CUSTOM_SETTINGS, preset)
+        merged['id'] = preset.get('id') or str(uuid.uuid4())
+        merged['name'] = preset.get('name') or '我的自定义格式'
+        merged['is_builtin'] = bool(preset.get('is_builtin', False))
+        merged_presets.append(merged)
+
+    config['schema_version'] = CONFIG_SCHEMA_VERSION
+    config['presets'] = merged_presets
+    active_id = config.get('active_preset_id')
+    if not active_id or not any(p.get('id') == active_id for p in merged_presets):
+        config['active_preset_id'] = merged_presets[0].get('id')
+    return config
+
+
 def save_custom_settings(config):
     """保存配置文件。
     
@@ -388,21 +394,26 @@ def save_custom_settings(config):
         # 兼容：如果调用方还在传旧的 settings dict（无 schema_version），
         # 自动包装成单 preset 的新 schema
         if 'schema_version' not in config:
+            preset = {
+                **config,
+                'id': str(uuid.uuid4()),
+                'name': config.get('name', '我的自定义格式'),
+                'is_builtin': False,
+            }
             config = {
                 'schema_version': CONFIG_SCHEMA_VERSION,
-                'active_preset_id': None,
-                'presets': [{
-                    **config,
-                    'id': str(uuid.uuid4()),
-                    'name': config.get('name', '我的自定义格式'),
-                    'is_builtin': False,
-                }]
+                'active_preset_id': preset['id'],
+                'presets': [preset]
             }
         else:
             config['schema_version'] = CONFIG_SCHEMA_VERSION
+            presets = config.get('presets') or []
+            if presets and not config.get('active_preset_id'):
+                config['active_preset_id'] = presets[0].get('id')
         
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
+        return CONFIG_FILE
     except Exception as e:
         print(f"[错误] 保存配置失败: {e}")
 
@@ -3107,8 +3118,8 @@ class DocFormatApp:
         self.root = root
         self.root.title("公文格式处理工具")
         _init_system_fonts()
-        self.root.geometry("750x900")
-        self.root.minsize(680, 750)
+        self.root.geometry("1180x900")
+        self.root.minsize(980, 780)
         self.root.configure(bg=Theme.BG)
         
         # 变量
@@ -4357,16 +4368,18 @@ class DocFormatApp:
         try:
             cb = progress_callback if progress_callback is not None else self._update_progress
             bold_serial = True
+            custom_settings = None
             if preset_name == 'custom':
                 try:
                     _config = load_custom_settings()
                     _cs = get_active_user_preset(_config)
+                    custom_settings = _cs
                     bold_serial = _cs.get('bold_serial', True)
                 except Exception:
                     pass
             format_document(input_path, output_path, preset_name,
                            progress_callback=cb, revision_mode=revision_mode,
-                           bold_serial=bold_serial)
+                           bold_serial=bold_serial, custom_settings=custom_settings)
         finally:
             formatter_logger.removeHandler(handler)
         
