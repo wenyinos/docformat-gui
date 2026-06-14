@@ -111,7 +111,7 @@ except Exception as e:
     _DND_DISABLED_REASON = f"拖拽运行库不可用：{e}"
     _DND_AVAILABLE = False
 
-__version__ = '1.8.5'
+__version__ = '1.8.6'
 
 def _open_file(path):
     """跨平台打开文件"""

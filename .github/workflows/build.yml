@@ -26,13 +26,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller python-docx pywin32
+          pip install pyinstaller -r requirements.txt
 
       - name: Build Windows executable
         run: |
-          $docxPath = python -c "import docx, os; print(os.path.join(os.path.dirname(docx.__file__), 'templates'))"
-          echo "docx templates path: $docxPath"
-          pyinstaller --onefile --windowed --name=docformat_windows --icon assets/icon.ico --add-data "scripts;scripts" --add-data "${docxPath};docx/templates" --hidden-import=docx --hidden-import=lxml --hidden-import=pythoncom --hidden-import=pywintypes docformat_gui.py
+          python build.py windows
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -58,15 +56,9 @@ jobs:
 
       - name: Build Windows 7 compatible executable
         run: |
-          $docxPath = python -c "import docx, os; print(os.path.join(os.path.dirname(docx.__file__), 'templates'))"
-          echo "docx templates path: $docxPath"
-          pyinstaller --onefile --windowed --name=docformat_windows_win7 `
-            --icon assets/icon.ico `
-            --add-data "scripts;scripts" `
-            --add-data "${docxPath};docx/templates" `
-            --hidden-import=docx --hidden-import=lxml `
-            --hidden-import=pythoncom --hidden-import=pywintypes `
-            docformat_gui.py
+          python build.py windows
+        env:
+          WINDOWS_OUTPUT_NAME: docformat_windows_win7
 
       - name: Upload Windows 7 artifact
         uses: actions/upload-artifact@v4

@@ -16,8 +16,9 @@ from pathlib import Path
 # 配置
 APP_NAME = "公文格式处理工具"
 APP_NAME_EN = "DocFormatter"
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 MAIN_SCRIPT = "docformat_gui.py"
+MACOS_APP_BUNDLE_NAME = os.environ.get("MACOS_APP_BUNDLE_NAME", "公文格式处理助手").strip()
 
 # 输出目录
 DIST_DIR = Path("dist")
@@ -130,8 +131,9 @@ def _patch_macos_info_plist(app_path):
     with open(plist_path, "rb") as f:
         data = plistlib.load(f)
 
-    data["CFBundleName"] = APP_NAME
-    data["CFBundleDisplayName"] = APP_NAME
+    macos_name = MACOS_APP_BUNDLE_NAME or APP_NAME
+    data["CFBundleName"] = macos_name
+    data["CFBundleDisplayName"] = macos_name
     data["CFBundleIdentifier"] = "com.kagurananaga.docformat-gui"
     data["CFBundleDevelopmentRegion"] = "zh_CN"
     data["CFBundleLocalizations"] = ["zh_CN", "en"]
@@ -267,7 +269,7 @@ def _notarize_and_staple(target_path):
     return True
 
 
-def _create_macos_installer_dmg(source_path, dmg_path, volume_name="DocFormatter"):
+def _create_macos_installer_dmg(source_path, dmg_path, volume_name="DocFormatter", app_bundle_name=None):
     """生成带 Applications 入口的 macOS 安装 DMG。"""
     source = Path(source_path)
     dmg = Path(dmg_path)
@@ -279,7 +281,10 @@ def _create_macos_installer_dmg(source_path, dmg_path, volume_name="DocFormatter
 
     try:
         if source.is_dir():
-            target = staging_dir / source.name
+            target_name = app_bundle_name or source.name
+            if not target_name.endswith(".app"):
+                target_name = f"{target_name}.app"
+            target = staging_dir / target_name
             # ditto 更适合复制 .app bundle，可保留 macOS 元数据。
             copy_result = subprocess.run(
                 ["ditto", str(source), str(target)],
@@ -319,7 +324,7 @@ def build_windows():
     print("构建 Windows 版本")
     print("=" * 50)
     
-    output_name = f"docformat_windows"
+    output_name = os.environ.get("WINDOWS_OUTPUT_NAME", "").strip() or "docformat_windows"
     
     # 获取 docx 模板路径
     docx_tpl = _get_docx_templates_path()
@@ -337,6 +342,8 @@ def build_windows():
         f"--add-data={docx_tpl};docx/templates" if docx_tpl else "--collect-data=docx",
         "--hidden-import=docx",
         "--hidden-import=lxml",
+        "--hidden-import=pythoncom",
+        "--hidden-import=pywintypes",
         MAIN_SCRIPT
     ]
     cmd[-1:-1] = dnd_args
@@ -459,7 +466,7 @@ def build_macos():
 
             # 3) 生成 DMG（此时里面装的是已签名/已公证的 .app）
             dmg_path = DIST_DIR / f"{output_name}.dmg"
-            if _create_macos_installer_dmg(app_path, dmg_path):
+            if _create_macos_installer_dmg(app_path, dmg_path, app_bundle_name=MACOS_APP_BUNDLE_NAME):
                 size_mb = dmg_path.stat().st_size / (1024 * 1024)
                 print(f"  DMG: {dmg_path} ({size_mb:.1f} MB)")
                 # 4) DMG 容器本身也要公证 + 钉票据，用户从网上下载双击才不被拦

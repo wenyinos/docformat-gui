@@ -1,15 +1,7 @@
 # Document Format GUI (公文格式处理工具)
 
 <p align="center">
-  <img src="assets/icon_square.png" alt="公文格式助手图标" width="96">
-</p>
-
-<p align="center">
   <img src="assets/imageforgithub.png" alt="公文格式助手横幅" width="100%">
-</p>
-
-<p align="center">
-  <img src="assets/screenshot.png" alt="软件截图" width="900">
 </p>
 
 <p align="center">
@@ -42,9 +34,9 @@
 * **🔒 安全离线** — 纯本地运行，数据不联网，保障公文安全
 * **📋 标准规范** — 严格遵循党政机关公文格式标准
 
-**v1.8.5 更新：**
+**v1.8.6 更新：**
 
-* **🖱️ 拖拽兼容增强** — 拖拽组件初始化失败时自动降级为点击选择文件，并在日志里说明原因；管理员模式会明确提示 Windows 拦截拖拽
+* **🖱️ 拖拽兼容增强** — GitHub 发布版会打包拖拽运行库；拖拽组件初始化失败时自动降级为点击选择文件，并在日志里说明原因
 * **✅ 复选框渲染修复** — 主界面和自定义模式开关改为自绘样式，避免部分 Windows 主题下系统复选框显示异常
 * **🍎 macOS 安装体验** — DMG 内置 **Applications（应用程序）** 拖拽入口；发布包支持 Developer ID 签名，补齐公证密钥后会自动进行 Apple 公证
 * **🎨 品牌展示更新** — 新增应用图标、GitHub 横幅图和新版界面截图
@@ -52,6 +44,10 @@
 * **🔤 macOS 公文字体别名** — 优先识别手动安装的 `仿宋_GB32312 / 楷体_GB32312` 等兼容字体
 
 ---
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="软件截图" width="900">
+</p>
 
 ## 核心能力
 
