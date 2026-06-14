@@ -9,7 +9,7 @@ import sys
 import threading
 import re
 import uuid
-import logging
+import ctypes
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
@@ -19,19 +19,87 @@ SCRIPT_DIR = Path(__file__).parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from scripts.analyzer import analyze_punctuation, analyze_numbering, analyze_paragraph_format, analyze_font
-from scripts.punctuation import process_document as fix_punctuation
 from scripts.formatter import format_document, PRESETS
-from scripts import ai_config
-from scripts.ai_checker import check_document as ai_check_document, annotate_document as ai_annotate_document
+
+
+_DND_DISABLED_REASON = ""
+_DPI_AWARENESS_SET = False
+_UI_DENSITY = 1.0
+
+
+def _enable_windows_high_dpi():
+    """尽早启用 DPI 感知，兼容 Win7 到 Win11 的缩放行为。"""
+    global _DPI_AWARENESS_SET
+    if _DPI_AWARENESS_SET or os.name != 'nt':
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        _DPI_AWARENESS_SET = True
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        _DPI_AWARENESS_SET = True
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+        _DPI_AWARENESS_SET = True
+    except Exception:
+        pass
+
+
+def _configure_tk_high_dpi(root):
+    """让 Tk 字体、控件和画布尺寸跟随当前显示器 DPI。"""
+    global _UI_DENSITY
+    try:
+        dpi = float(root.winfo_fpixels('1i'))
+        scaling = max(1.0, min(4.0, dpi / 72.0))
+        root.tk.call('tk', 'scaling', scaling)
+        _UI_DENSITY = max(1.0, min(2.5, dpi / 96.0))
+        if 'Theme' in globals():
+            Theme.apply_density(_UI_DENSITY)
+        root._docformat_dpi = dpi
+        root._docformat_scaling = scaling
+    except Exception:
+        root._docformat_dpi = 96.0
+        root._docformat_scaling = 96.0 / 72.0
+
+
+def ui_px(value):
+    """把固定像素尺寸转换为适合当前显示器缩放的尺寸。"""
+    return max(1, int(round(float(value) * _UI_DENSITY)))
+
+
+_enable_windows_high_dpi()
+
+
+def _is_windows_elevated():
+    """返回当前进程是否以管理员权限运行。"""
+    if os.name != 'nt':
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def _should_enable_drag_drop():
     """判断当前运行环境是否启用文件拖拽。"""
+    global _DND_DISABLED_REASON
+    _DND_DISABLED_REASON = ""
     if os.environ.get('DOCFORMAT_DISABLE_DND') == '1':
+        _DND_DISABLED_REASON = "已通过 DOCFORMAT_DISABLE_DND 禁用拖拽"
+        return False
+    if _is_windows_elevated():
+        _DND_DISABLED_REASON = "当前为管理员模式，Windows 会拦截普通资源管理器拖拽"
         return False
     # v1.8.1: macOS 打包版先禁用 tkdnd，优先保证 .app/.dmg 可正常打开。
     # 源码运行仍可用拖拽，后续待打包稳定后再恢复。
     if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
+        _DND_DISABLED_REASON = "macOS 打包版暂时禁用拖拽"
         return False
     return True
 
@@ -39,10 +107,11 @@ def _should_enable_drag_drop():
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES, COPY
     _DND_AVAILABLE = _should_enable_drag_drop()
-except ImportError:
+except Exception as e:
+    _DND_DISABLED_REASON = f"拖拽运行库不可用：{e}"
     _DND_AVAILABLE = False
 
-__version__ = '1.8.4'
+__version__ = '1.8.5'
 
 def _open_file(path):
     """跨平台打开文件"""
@@ -66,11 +135,15 @@ class Theme:
     CARD = '#FFFFFF'            # 纯白卡片
     CARD_ALT = '#F7F4EF'        # 米黄卡片（推荐区）
     INPUT_BG = '#F2EFE9'        # 输入框背景（稍深米色）
+    SURFACE = '#FFFDF9'         # 轻质面板
     
     # 陶土红
     PRIMARY = '#BC4B26'         # 朱砂/印泥色
     PRIMARY_HOVER = '#A3421F'   # 悬停加深
     PRIMARY_LIGHT = '#F9F0EC'   # 极淡红
+    PRIMARY_SOFT = '#E7A28A'    # 柔和强调色
+    ACCENT = '#2F6F73'          # 青绿色，用于开关选中状态
+    ACCENT_LIGHT = '#EAF5F3'    # 极淡青绿色
     
     # 文字
     TEXT = '#2E2E2E'            # 深炭灰
@@ -81,6 +154,7 @@ class Theme:
     BORDER = '#E8E4DE'          # 温暖灰边框
     BORDER_LIGHT = '#F0EDE8'    # 更浅边框
     BORDER_SELECTED = '#BC4B26' # 选中边框
+    SHADOW = '#E4DED5'          # 轻阴影
     
     # 日志区
     LOG_BG = '#1A1A1A'
@@ -102,6 +176,19 @@ class Theme:
     SPACE_MD = 16
     SPACE_LG = 24
     SPACE_XL = 40
+
+    _BASE_SPACING = (4, 8, 16, 24, 40)
+
+    @classmethod
+    def apply_density(cls, density):
+        values = [max(1, int(round(value * density))) for value in cls._BASE_SPACING]
+        (
+            cls.SPACE_XS,
+            cls.SPACE_SM,
+            cls.SPACE_MD,
+            cls.SPACE_LG,
+            cls.SPACE_XL,
+        ) = values
 
 
 def get_font(size=12, weight='normal'):
@@ -171,10 +258,24 @@ COMMON_FONTS_EN = []
 
 # 公文常用字体（作为优先推荐，始终显示在列表顶部）
 _PRIORITY_FONTS = [
-    '仿宋_GB2312', '仿宋', '宋体', '黑体', '楷体_GB2312', '楷体',
+    '仿宋_GB2312', '仿宋_GB32312', '仿宋', '宋体', '黑体',
+    '楷体_GB2312', '楷体_GB32312', '楷体',
     '方正小标宋简体', '方正仿宋_GBK', '华文仿宋', '华文中宋',
     'Times New Roman', 'Arial', 'Calibri', 'Cambria',
 ]
+
+PAGE_NUMBER_STYLE_OPTIONS = {
+    'dash': '— 1 —（公文标准）',
+    'plain': '1（纯数字）',
+    'page_text': '第 1 页',
+    'page_total': '1 / 总页数',
+}
+PAGE_NUMBER_POSITION_OPTIONS = {
+    'outside': '奇数页右、偶数页左（外侧）',
+    'center': '全部居中',
+    'right': '全部居右',
+    'left': '全部居左',
+}
 
 def _init_system_fonts():
     """
@@ -276,7 +377,11 @@ DEFAULT_CUSTOM_SETTINGS = {
     'deep_clean': False,
     'page_number': True,
     'page_number_font': '宋体',
-    'footer_distance': 0.7,
+    'page_number_size': 14,
+    'page_number_style': 'dash',
+    'page_number_position': 'outside',
+    'page_number_offset_mm': 7,
+    'replace_existing_page_number': True,
 }
 
 
@@ -347,6 +452,20 @@ def _merge_settings(defaults, custom):
     return merged
 
 
+def _ensure_page_number_defaults(preset):
+    """补齐新版页码配置，并兼容旧版 footer_distance 字段。"""
+    if not isinstance(preset, dict):
+        return preset
+    preset.setdefault('page_number', True)
+    preset.setdefault('page_number_font', '宋体')
+    preset.setdefault('page_number_size', 14)
+    preset.setdefault('page_number_style', 'dash')
+    preset.setdefault('page_number_position', 'outside')
+    preset.setdefault('page_number_offset_mm', 7)
+    preset.setdefault('replace_existing_page_number', True)
+    return preset
+
+
 def load_custom_settings():
     """加载用户自定义设置，并修复旧配置缺失的 active preset。"""
     if not CONFIG_FILE.exists():
@@ -374,6 +493,7 @@ def load_custom_settings():
         merged['id'] = preset.get('id') or str(uuid.uuid4())
         merged['name'] = preset.get('name') or '我的自定义格式'
         merged['is_builtin'] = bool(preset.get('is_builtin', False))
+        _ensure_page_number_defaults(merged)
         merged_presets.append(merged)
 
     config['schema_version'] = CONFIG_SCHEMA_VERSION
@@ -400,6 +520,7 @@ def save_custom_settings(config):
                 'name': config.get('name', '我的自定义格式'),
                 'is_builtin': False,
             }
+            _ensure_page_number_defaults(preset)
             config = {
                 'schema_version': CONFIG_SCHEMA_VERSION,
                 'active_preset_id': preset['id'],
@@ -408,6 +529,8 @@ def save_custom_settings(config):
         else:
             config['schema_version'] = CONFIG_SCHEMA_VERSION
             presets = config.get('presets') or []
+            for preset in presets:
+                _ensure_page_number_defaults(preset)
             if presets and not config.get('active_preset_id'):
                 config['active_preset_id'] = presets[0].get('id')
         
@@ -506,6 +629,17 @@ class CustomSettingsDialog(tk.Toplevel):
         self.after_idle(self._load_values)  # 事件循环空闲后再刷新一次，兜底
     
     # ==================== 界面构建 ====================
+
+    def _create_inline_toggle(self, parent, text, variable, font_size=11):
+        """创建自绘小复选框，避免系统主题导致勾选框显示异常。"""
+        return InlineToggle(
+            parent,
+            text=text,
+            variable=variable,
+            box_size=22,
+            font=get_font(font_size),
+            bg=Theme.BG,
+        )
     
     def _create_widgets(self):
         """创建控件 - 快速设置 + 可折叠高级设置"""
@@ -606,9 +740,9 @@ class CustomSettingsDialog(tk.Toplevel):
         tk.Label(row_t, text="磅", font=get_font(10), bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left')
         
         self.title_bold_var = tk.BooleanVar(value=self.settings.get('title', {}).get('bold', False))
-        tk.Checkbutton(row_t, text="加粗", variable=self.title_bold_var,
-                        font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-                        activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(10, 0))
+        self._create_inline_toggle(
+            row_t, "加粗", self.title_bold_var
+        ).pack(side='left', padx=(10, 0))
         
         # --- 一级标题 / 二级标题 ---
         self._create_section(main, "🔤 各级标题字体", pad_x)
@@ -627,9 +761,9 @@ class CustomSettingsDialog(tk.Toplevel):
                               initial_value=self._size_display(self.settings.get('heading1', {}).get('size', 16))).pack(side='left', padx=3)
         
         self.h1_bold_var = tk.BooleanVar(value=self.settings.get('heading1', {}).get('bold', False))
-        tk.Checkbutton(row_h1, text="加粗", variable=self.h1_bold_var,
-                        font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-                        activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(10, 0))
+        self._create_inline_toggle(
+            row_h1, "加粗", self.h1_bold_var
+        ).pack(side='left', padx=(10, 0))
         
         row_h2 = tk.Frame(heading_frame, bg=Theme.BG)
         row_h2.pack(fill='x', pady=2)
@@ -643,9 +777,9 @@ class CustomSettingsDialog(tk.Toplevel):
                               initial_value=self._size_display(self.settings.get('heading2', {}).get('size', 16))).pack(side='left', padx=3)
         
         self.h2_bold_var = tk.BooleanVar(value=self.settings.get('heading2', {}).get('bold', False))
-        tk.Checkbutton(row_h2, text="加粗", variable=self.h2_bold_var,
-                        font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-                        activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(10, 0))
+        self._create_inline_toggle(
+            row_h2, "加粗", self.h2_bold_var
+        ).pack(side='left', padx=(10, 0))
         
         # --- 正文格式 ---
         self._create_section(main, "📖 正文格式", pad_x)
@@ -670,9 +804,9 @@ class CustomSettingsDialog(tk.Toplevel):
         tk.Label(row_b1, text="磅", font=get_font(10), bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left')
         
         self.body_bold_var = tk.BooleanVar(value=self.settings.get('body', {}).get('bold', False))
-        tk.Checkbutton(row_b1, text="加粗", variable=self.body_bold_var,
-                        font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-                        activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(10, 0))
+        self._create_inline_toggle(
+            row_b1, "加粗", self.body_bold_var
+        ).pack(side='left', padx=(10, 0))
         
         row_b_en = tk.Frame(body_frame, bg=Theme.BG)
         row_b_en.pack(fill='x', pady=2)
@@ -752,20 +886,15 @@ class CustomSettingsDialog(tk.Toplevel):
         row_tbl2 = tk.Frame(table_frame, bg=Theme.BG)
         row_tbl2.pack(fill='x', pady=2)
         self.table_header_bold_var = tk.BooleanVar(value=self.settings.get('table', {}).get('header_bold', True))
-        tk.Checkbutton(
-            row_tbl2, text="表头行加粗", variable=self.table_header_bold_var,
-            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
+        self._create_inline_toggle(
+            row_tbl2, "表头行加粗", self.table_header_bold_var
         ).pack(side='left', padx=(6, 0))
         
         self.table_smart_align_var = tk.BooleanVar(
             value=self.settings.get('table', {}).get('smart_align', False)
         )
-        tk.Checkbutton(
-            row_tbl2, text="智能调整单元格对齐",
-            variable=self.table_smart_align_var,
-            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
+        self._create_inline_toggle(
+            row_tbl2, "智能调整单元格对齐", self.table_smart_align_var
         ).pack(side='left', padx=(16, 0))
 
         # ⓘ 说明按钮
@@ -807,67 +936,119 @@ class CustomSettingsDialog(tk.Toplevel):
             ).pack(side='left', padx=(0, 8))
 
         self.first_bold_var = tk.BooleanVar(value=self.settings.get('first_line_bold', False))
-        tk.Checkbutton(
-            special_frame, text="正文段落首句加粗", variable=self.first_bold_var,
-            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            padx=6, pady=3
-        ).pack(anchor='w')
+        self._create_inline_toggle(
+            special_frame, "正文段落首句加粗", self.first_bold_var, font_size=12
+        ).pack(anchor='w', padx=6, pady=3)
 
         self.bold_serial_var = tk.BooleanVar(value=self.settings.get('bold_serial', True))
-        tk.Checkbutton(
+        self._create_inline_toggle(
             special_frame,
-            text="「一是/一要/第一条」等序列词自动加粗",
-            variable=self.bold_serial_var,
-            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            padx=6, pady=3
-        ).pack(anchor='w')
+            "「一是/一要/第一条」等序列词自动加粗",
+            self.bold_serial_var,
+            font_size=12,
+        ).pack(anchor='w', padx=6, pady=3)
 
         self.deep_clean_var = tk.BooleanVar(value=self.settings.get('deep_clean', False))
-        tk.Checkbutton(
+        self._create_inline_toggle(
             special_frame,
-            text="强力清洗模式（清除原文格式后再排版，适合 AI 粘贴的内容）",
-            variable=self.deep_clean_var,
-            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            padx=6, pady=3
-        ).pack(anchor='w')
-        
+            "强力清洗模式（清除原文格式后再排版，适合复制粘贴的内容）",
+            self.deep_clean_var,
+            font_size=12,
+        ).pack(anchor='w', padx=6, pady=3)
+
         self.page_number_var = tk.BooleanVar(value=self.settings.get('page_number', True))
-        tk.Checkbutton(
-            special_frame, text="添加页码", variable=self.page_number_var,
-            font=get_font(12), bg=Theme.BG, fg=Theme.TEXT,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            padx=6, pady=3
-        ).pack(anchor='w')
-        
-        # 页码字体
+        self._create_inline_toggle(
+            special_frame, "添加页码", self.page_number_var, font_size=12
+        ).pack(anchor='w', padx=6, pady=3)
+
+        # 页码格式
         pn_row = tk.Frame(special_frame, bg=Theme.BG)
-        pn_row.pack(anchor='w', pady=(2, 6))
-        tk.Label(pn_row, text="页码字体:", font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY).pack(side='left', padx=(6, 4))
-        self.page_number_font_var = tk.StringVar(value=self.settings.get('page_number_font', '宋体'))
-        page_number_fonts = ['宋体', '仿宋', '仿宋_GB2312', 'Times New Roman']
+        pn_row.pack(fill='x', anchor='w', pady=(2, 4))
+        tk.Label(
+            pn_row, text="页码样式:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(6, 4))
+        current_style = self.settings.get('page_number_style', 'dash')
+        self.page_number_style_var = tk.StringVar(
+            value=PAGE_NUMBER_STYLE_OPTIONS.get(current_style, PAGE_NUMBER_STYLE_OPTIONS['dash'])
+        )
         self._create_combobox(
-            pn_row, self.page_number_font_var, page_number_fonts, width=16,
+            pn_row, self.page_number_style_var,
+            list(PAGE_NUMBER_STYLE_OPTIONS.values()), width=22,
+            initial_value=self.page_number_style_var.get()
+        ).pack(side='left')
+
+        tk.Label(
+            pn_row, text="位置:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(14, 4))
+        current_position = self.settings.get('page_number_position', 'outside')
+        self.page_number_position_var = tk.StringVar(
+            value=PAGE_NUMBER_POSITION_OPTIONS.get(
+                current_position, PAGE_NUMBER_POSITION_OPTIONS['outside']
+            )
+        )
+        self._create_combobox(
+            pn_row, self.page_number_position_var,
+            list(PAGE_NUMBER_POSITION_OPTIONS.values()), width=28,
+            initial_value=self.page_number_position_var.get()
+        ).pack(side='left')
+
+        pn_font_row = tk.Frame(special_frame, bg=Theme.BG)
+        pn_font_row.pack(fill='x', anchor='w', pady=(2, 4))
+        tk.Label(
+            pn_font_row, text="页码字体:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(6, 4))
+        self.page_number_font_var = tk.StringVar(value=self.settings.get('page_number_font', '宋体'))
+        page_number_fonts = COMMON_FONTS_CN or ['宋体', '仿宋', '仿宋_GB2312', 'Times New Roman']
+        self._create_combobox(
+            pn_font_row, self.page_number_font_var, page_number_fonts, width=18,
             initial_value=self.page_number_font_var.get()
+        ).pack(side='left')
+
+        tk.Label(
+            pn_font_row, text="字号:", font=get_font(11),
+            bg=Theme.BG, fg=Theme.TEXT_SECONDARY
+        ).pack(side='left', padx=(14, 4))
+        self.page_number_size_var = tk.StringVar(
+            value=self._size_display(self.settings.get('page_number_size', 14))
+        )
+        self._create_combobox(
+            pn_font_row, self.page_number_size_var,
+            [f"{name}({pt}pt)" for name, pt in FONT_SIZES],
+            width=11, initial_value=self.page_number_size_var.get()
         ).pack(side='left')
 
         fd_row = tk.Frame(special_frame, bg=Theme.BG)
         fd_row.pack(anchor='w', pady=(2, 6))
         tk.Label(
-            fd_row, text="页码距底边:", font=get_font(11),
+            fd_row, text="距版心下边缘:", font=get_font(11),
             bg=Theme.BG, fg=Theme.TEXT_SECONDARY
         ).pack(side='left', padx=(6, 4))
-        self.footer_distance_var = tk.StringVar(
-            value=str(self.settings.get('footer_distance', 0.7))
+        self.page_number_offset_var = tk.StringVar(
+            value=str(self.settings.get('page_number_offset_mm', 7))
         )
         tk.Entry(
-            fd_row, textvariable=self.footer_distance_var,
+            fd_row, textvariable=self.page_number_offset_var,
             font=get_font(11), width=5, relief='solid', bd=1
         ).pack(side='left')
-        tk.Label(fd_row, text=" cm", font=get_font(10),
+        tk.Label(fd_row, text=" mm", font=get_font(10),
                  bg=Theme.BG, fg=Theme.TEXT_MUTED).pack(side='left')
+        tk.Label(
+            fd_row,
+            text="  公文通常为 7mm；程序会根据下边距自动换算，不是距纸底 7mm",
+            font=get_font(9), bg=Theme.BG, fg=Theme.TEXT_MUTED
+        ).pack(side='left', padx=(8, 0))
+
+        self.replace_page_number_var = tk.BooleanVar(
+            value=self.settings.get('replace_existing_page_number', True)
+        )
+        self._create_inline_toggle(
+            special_frame,
+            "重新应用页码设置（替换文档中已有的页码）",
+            self.replace_page_number_var,
+        ).pack(anchor='w', padx=6, pady=2)
         
         # ============================================================
         #  高级设置（可折叠）
@@ -1283,9 +1464,9 @@ class CustomSettingsDialog(tk.Toplevel):
         # 加粗
         default_bold = DEFAULT_CUSTOM_SETTINGS.get(key, {}).get('bold', False)
         bold_var = tk.BooleanVar(value=self.settings.get(key, {}).get('bold', default_bold))
-        tk.Checkbutton(row, text="粗", variable=bold_var,
-                        font=get_font(10), bg=Theme.BG, fg=Theme.TEXT,
-                        activebackground=Theme.BG, selectcolor=Theme.CARD).pack(side='left', padx=(6, 0))
+        self._create_inline_toggle(
+            row, "粗", bold_var, font_size=10
+        ).pack(side='left', padx=(6, 0))
         
         # 存储变量引用
         self._adv_vars[key] = {'font': font_var, 'font_en': font_en_var, 'size': size_var, 'line_spacing': ls_var, 'bold': bold_var}
@@ -1365,28 +1546,45 @@ class CustomSettingsDialog(tk.Toplevel):
         self.canvas.itemconfig(self.canvas_window, width=event.width)
     
     def _bind_mousewheel(self):
-        self.canvas.bind_all('<MouseWheel>', self._on_mousewheel)
-        self.canvas.bind_all('<Button-4>', self._on_mousewheel)
-        self.canvas.bind_all('<Button-5>', self._on_mousewheel)
-        self.canvas.bind_all('<Shift-MouseWheel>', self._on_shift_mousewheel)
+        # 只绑定到自定义设置窗口自身，避免 unbind_all 把主窗口滚轮也解绑。
+        self.bind('<MouseWheel>', self._on_mousewheel)
+        self.bind('<Button-4>', self._on_mousewheel)
+        self.bind('<Button-5>', self._on_mousewheel)
+        self.bind('<Shift-MouseWheel>', self._on_shift_mousewheel)
+        self.canvas.bind('<MouseWheel>', self._on_mousewheel)
+        self.canvas.bind('<Button-4>', self._on_mousewheel)
+        self.canvas.bind('<Button-5>', self._on_mousewheel)
+        self.canvas.bind('<Shift-MouseWheel>', self._on_shift_mousewheel)
     
     def _unbind_mousewheel(self):
-        self.canvas.unbind_all('<MouseWheel>')
-        self.canvas.unbind_all('<Button-4>')
-        self.canvas.unbind_all('<Button-5>')
-        self.canvas.unbind_all('<Shift-MouseWheel>')
+        self.unbind('<MouseWheel>')
+        self.unbind('<Button-4>')
+        self.unbind('<Button-5>')
+        self.unbind('<Shift-MouseWheel>')
+        self.canvas.unbind('<MouseWheel>')
+        self.canvas.unbind('<Button-4>')
+        self.canvas.unbind('<Button-5>')
+        self.canvas.unbind('<Shift-MouseWheel>')
     
     def _on_mousewheel(self, event):
-        if event.num == 4:
+        if getattr(event, 'num', None) == 4:
             self.canvas.yview_scroll(-1, 'units')
-        elif event.num == 5:
+        elif getattr(event, 'num', None) == 5:
             self.canvas.yview_scroll(1, 'units')
         else:
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+            delta = getattr(event, 'delta', 0)
+            units = -int(delta / 120) if delta else 0
+            if units == 0 and delta:
+                units = -1 if delta > 0 else 1
+            if units:
+                self.canvas.yview_scroll(units, 'units')
+        return "break"
 
     def _on_shift_mousewheel(self, event):
-        if event.delta:
-            self.canvas.xview_scroll(int(-1 * (event.delta / 120)), 'units')
+        delta = getattr(event, 'delta', 0)
+        if delta:
+            self.canvas.xview_scroll(int(-1 * (delta / 120)), 'units')
+        return "break"
     
     def _create_section(self, parent, title, padx=0):
         tk.Label(
@@ -1516,8 +1714,22 @@ class CustomSettingsDialog(tk.Toplevel):
             self.deep_clean_var.set(s.get('deep_clean', False))
             self.space_handling_var.set(s.get('space_handling', 'remove_all'))
             self.page_number_var.set(s.get('page_number', True))
+            self.page_number_style_var.set(
+                PAGE_NUMBER_STYLE_OPTIONS.get(
+                    s.get('page_number_style', 'dash'),
+                    PAGE_NUMBER_STYLE_OPTIONS['dash']
+                )
+            )
+            self.page_number_position_var.set(
+                PAGE_NUMBER_POSITION_OPTIONS.get(
+                    s.get('page_number_position', 'outside'),
+                    PAGE_NUMBER_POSITION_OPTIONS['outside']
+                )
+            )
             self.page_number_font_var.set(s.get('page_number_font', '宋体'))
-            self.footer_distance_var.set(str(s.get('footer_distance', 0.7)))
+            self._set_size_var(self.page_number_size_var, s.get('page_number_size', 14))
+            self.page_number_offset_var.set(str(s.get('page_number_offset_mm', 7)))
+            self.replace_page_number_var.set(s.get('replace_existing_page_number', True))
             
             # 高级设置
             for key, vars_dict in self._adv_vars.items():
@@ -1575,6 +1787,25 @@ class CustomSettingsDialog(tk.Toplevel):
         body_font = self.body_font_var.get()
         global_font_en = self.global_font_en_var.get()
         body_bold = self.body_bold_var.get()
+        page_number_style = next(
+            (
+                key for key, label in PAGE_NUMBER_STYLE_OPTIONS.items()
+                if label == self.page_number_style_var.get()
+            ),
+            'dash',
+        )
+        page_number_position = next(
+            (
+                key for key, label in PAGE_NUMBER_POSITION_OPTIONS.items()
+                if label == self.page_number_position_var.get()
+            ),
+            'outside',
+        )
+        try:
+            page_number_offset_mm = float(self.page_number_offset_var.get())
+        except ValueError:
+            page_number_offset_mm = 7
+        page_number_offset_mm = max(0, min(30, page_number_offset_mm))
 
         # 构建基础设置 — 正文字体联动到多个元素
         self.settings = {
@@ -1649,7 +1880,11 @@ class CustomSettingsDialog(tk.Toplevel):
             'deep_clean': self.deep_clean_var.get(),
             'page_number': self.page_number_var.get(),
             'page_number_font': self.page_number_font_var.get(),
-            'footer_distance': float(self.footer_distance_var.get()) if self.footer_distance_var.get() else 0.7
+            'page_number_size': self._get_size_from_var(self.page_number_size_var),
+            'page_number_style': page_number_style,
+            'page_number_position': page_number_position,
+            'page_number_offset_mm': page_number_offset_mm,
+            'replace_existing_page_number': self.replace_page_number_var.get(),
         }
 
         # 应用高级设置覆盖（仅在用户真正修改过时）
@@ -1726,7 +1961,7 @@ class CustomSettingsDialog(tk.Toplevel):
 class PasteTextDialog(tk.Toplevel):
     """从粘贴文本生成 docx 的对话框（v1.8.0 新增）。
 
-    用户粘贴 AI 生成的文本 → 工具创建临时 docx → 走 format_document 流程
+    用户粘贴文本 → 工具创建临时 docx → 走 format_document 流程
     → 输出格式化后的 docx。
     """
 
@@ -1816,7 +2051,7 @@ class PasteTextDialog(tk.Toplevel):
 
         # --- 正文粘贴区 ---
         tk.Label(
-            main, text="正文内容（粘贴 AI 生成的文本）：",
+            main, text="正文内容（可粘贴纯文本或 Markdown）：",
             font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY
         ).pack(anchor='w', pady=(0, 4))
 
@@ -1841,7 +2076,7 @@ class PasteTextDialog(tk.Toplevel):
 
         # 占位提示文字
         placeholder = (
-            "粘贴 AI 生成的文本到这里...\n\n"
+            "粘贴文本到这里...\n\n"
             "· 每个空行分隔的段落自动作为新段\n"
             "· 一、（一）1. 等编号自动识别为各级标题\n"
             "· 落款单位、日期自动识别"
@@ -2043,7 +2278,7 @@ def _create_docx_from_text(title, body_text, output_path):
     title_run = title_para.add_run(title.strip())
     title_run.font.size = Pt(22)
 
-    # 正文：先按双换行拆段，每段内的单换行也拆成独立段（保留 AI 输出的自然分段）
+    # 正文：先按双换行拆段，每段内的单换行也拆成独立段。
     body_text = body_text.strip()
     if body_text:
         blocks = body_text.split('\n\n')
@@ -2330,16 +2565,6 @@ class Icons:
         canvas.create_line(x+s*0.75, y+s*0.35, x+s*0.85, y+s*0.25, fill=color, width=lw, capstyle='round')
 
     @staticmethod
-    def draw_ai(canvas, x, y, size=48, color='#2E2E2E'):
-        """AI 检查 - 对话气泡"""
-        s = size
-        lw = 2.5
-        canvas.create_oval(x+s*0.12, y+s*0.18, x+s*0.88, y+s*0.72, outline=color, width=lw)
-        canvas.create_line(x+s*0.35, y+s*0.72, x+s*0.24, y+s*0.88, fill=color, width=lw, capstyle='round')
-        canvas.create_line(x+s*0.26, y+s*0.46, x+s*0.74, y+s*0.46, fill=color, width=lw, capstyle='round')
-        canvas.create_line(x+s*0.36, y+s*0.58, x+s*0.64, y+s*0.58, fill=color, width=lw, capstyle='round')
-    
-    @staticmethod
     def draw_file(canvas, x, y, size=48, color='#2E2E2E'):
         """文件图标"""
         s = size
@@ -2448,22 +2673,31 @@ class FileInputField(tk.Frame):
     
     def _enable_drag_drop(self):
         """启用拖拽文件支持"""
+        global _DND_AVAILABLE, _DND_DISABLED_REASON
         root = self.winfo_toplevel()
-        if not getattr(root, '_dnd_registered', False):
-            root.drop_target_register(DND_FILES)
-            root.dnd_bind('<<Drop>>', self._dispatch_drop)
-            root._dnd_registered = True
-            root._dnd_fields = []
-        if not hasattr(root, '_dnd_fields'):
-            root._dnd_fields = []
-        if self not in root._dnd_fields:
-            root._dnd_fields.append(self)
+        if not hasattr(root, 'drop_target_register') or not hasattr(root, 'dnd_bind'):
+            _DND_AVAILABLE = False
+            _DND_DISABLED_REASON = "当前 Tk 根窗口不支持 tkinterdnd2"
+            return
+        try:
+            if not getattr(root, '_dnd_registered', False):
+                root.drop_target_register(DND_FILES)
+                root.dnd_bind('<<Drop>>', self._dispatch_drop)
+                root._dnd_registered = True
+                root._dnd_fields = []
+            if not hasattr(root, '_dnd_fields'):
+                root._dnd_fields = []
+            if self not in root._dnd_fields:
+                root._dnd_fields.append(self)
 
-        for widget in self._drop_widgets:
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind('<<DropEnter>>', self._on_drag_enter)
-            widget.dnd_bind('<<DropLeave>>', self._on_drag_leave)
-            widget.dnd_bind('<<Drop>>', self._on_drop)
+            for widget in self._drop_widgets:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind('<<DropEnter>>', self._on_drag_enter)
+                widget.dnd_bind('<<DropLeave>>', self._on_drag_leave)
+                widget.dnd_bind('<<Drop>>', self._on_drop)
+        except Exception as exc:
+            _DND_AVAILABLE = False
+            _DND_DISABLED_REASON = f"拖拽初始化失败：{exc}"
     
     def _on_drag_enter(self, event):
         """拖拽进入时高亮边框"""
@@ -2809,6 +3043,409 @@ class CollapsibleLog(tk.Frame):
         self.log_text.delete(1.0, tk.END)
 
 
+class ProcessingPanel(tk.Frame):
+    """运行中的动态状态面板。"""
+
+    TIPS = [
+        "正在整理文档结构",
+        "正在处理段落格式",
+        "正在应用公文规范",
+        "正在保存输出文件",
+    ]
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg=Theme.BG, **kwargs)
+        self.running = False
+        self.frame_index = 0
+        self.percent = 0
+        self.stage_text = "准备中..."
+
+        self.shadow = tk.Frame(self, bg=Theme.SHADOW)
+        self.card = tk.Frame(
+            self,
+            bg=Theme.SURFACE,
+            highlightbackground=Theme.BORDER,
+            highlightthickness=1
+        )
+        self.shadow.place(relx=0, rely=0, relwidth=1, relheight=1, x=3, y=3)
+        self.card.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.configure(height=ui_px(138))
+        self.pack_propagate(False)
+
+        inner = tk.Frame(self.card, bg=Theme.SURFACE)
+        inner.pack(fill='both', expand=True, padx=Theme.SPACE_LG, pady=ui_px(18))
+
+        self.canvas = tk.Canvas(
+            inner, width=ui_px(76), height=ui_px(76),
+            bg=Theme.SURFACE, highlightthickness=0
+        )
+        self.canvas.pack(side='left', padx=(0, Theme.SPACE_MD))
+
+        text_area = tk.Frame(inner, bg=Theme.SURFACE)
+        text_area.pack(side='left', fill='both', expand=True)
+        text_area.bind('<Configure>', self._on_text_area_configure)
+
+        self.title_label = tk.Label(
+            text_area,
+            text="正在处理文档",
+            font=get_font(14, 'bold'),
+            bg=Theme.SURFACE,
+            fg=Theme.TEXT,
+            anchor='w'
+        )
+        self.title_label.pack(fill='x', anchor='w')
+
+        self.stage_label = tk.Label(
+            text_area,
+            text=self.stage_text,
+            font=get_font(11),
+            bg=Theme.SURFACE,
+            fg=Theme.TEXT_SECONDARY,
+            anchor='w',
+            justify='left',
+            wraplength=520
+        )
+        self.stage_label.pack(fill='x', anchor='w', pady=(7, 0))
+
+        self.tip_label = tk.Label(
+            text_area,
+            text="",
+            font=get_font(10),
+            bg=Theme.SURFACE,
+            fg=Theme.TEXT_MUTED,
+            anchor='w',
+            justify='left',
+            wraplength=520
+        )
+        self.tip_label.pack(fill='x', anchor='w', pady=(9, 0))
+
+    def _on_text_area_configure(self, event):
+        wrap = max(240, event.width - 8)
+        self.stage_label.configure(wraplength=wrap)
+        self.tip_label.configure(wraplength=wrap)
+
+    def start(self, title=None):
+        self.running = True
+        self.frame_index = 0
+        self.percent = 0
+        self.stage_text = "准备中..."
+        self.title_label.configure(text=title or "正在处理文档")
+        self.stage_label.configure(text=self.stage_text)
+        self.tip_label.configure(text="")
+        self.pack(fill='x', pady=(0, Theme.SPACE_MD))
+        self._animate()
+
+    def update_status(self, percent, stage_text):
+        self.percent = max(0, min(int(percent), 100))
+        self.stage_text = stage_text or "处理中..."
+        self.stage_label.configure(text=self.stage_text)
+
+    def stop(self):
+        self.running = False
+        self.pack_forget()
+
+    def _animate(self):
+        if not self.running:
+            return
+
+        self.frame_index += 1
+        self.canvas.delete('all')
+        self._draw_animation()
+        if _UI_DENSITY > 1.01:
+            self.canvas.scale('all', 0, 0, _UI_DENSITY, _UI_DENSITY)
+
+        dot_count = (self.frame_index // 6) % 4
+        tip = self.TIPS[(self.frame_index // 28) % len(self.TIPS)]
+        self.tip_label.configure(text=f"{tip}{'.' * dot_count}")
+        self.after(90, self._animate)
+
+    def _draw_animation(self):
+        self.canvas.create_rectangle(
+            19, 10, 57, 64,
+            fill=Theme.PRIMARY_LIGHT,
+            outline=Theme.PRIMARY,
+            width=2
+        )
+        self.canvas.create_line(45, 10, 45, 24, fill=Theme.PRIMARY, width=2)
+        self.canvas.create_line(45, 24, 57, 24, fill=Theme.PRIMARY, width=2)
+
+        fill_h = max(4, int(38 * self.percent / 100))
+        self.canvas.create_rectangle(
+            25, 57 - fill_h, 51, 57,
+            fill=Theme.PRIMARY_SOFT,
+            outline=''
+        )
+        sweep_x = 23 + (self.frame_index * 2 % 30)
+        self.canvas.create_line(
+            sweep_x, 19, sweep_x, 56,
+            fill=Theme.PRIMARY,
+            width=2,
+            capstyle='round'
+        )
+
+
+class InlineToggle(tk.Frame):
+    """与主题一致的轻量开关行，用于替代系统默认复选框。"""
+
+    def __init__(self, parent, text, variable, command=None,
+                 box_size=28, font=None, bg=None, **kwargs):
+        self._bg = bg or Theme.BG
+        super().__init__(parent, bg=self._bg, **kwargs)
+        self.variable = variable
+        self.command = command
+        self.enabled = True
+
+        self._box_size = ui_px(box_size)
+        self.box = tk.Canvas(
+            self, width=self._box_size, height=self._box_size,
+            bg=self._bg, highlightthickness=0
+        )
+        self.box.pack(side='left', padx=(0, Theme.SPACE_SM))
+
+        self.label = tk.Label(
+            self,
+            text=text,
+            font=font or get_font(11, 'bold'),
+            bg=self._bg,
+            fg=Theme.TEXT_SECONDARY,
+            anchor='w'
+        )
+        self.label.pack(side='left', fill='x', expand=True)
+
+        for widget in (self, self.box, self.label):
+            widget.bind('<Button-1>', self._toggle)
+            widget.bind('<Enter>', self._on_enter)
+            widget.bind('<Leave>', self._on_leave)
+            widget.configure(cursor='hand2')
+
+        self.variable.trace_add('write', lambda *_: self._draw())
+        self._draw()
+
+    def configure(self, cnf=None, **kwargs):
+        state = kwargs.pop('state', None)
+        fg = kwargs.pop('fg', None)
+        result = super().configure(cnf or {}, **kwargs)
+        if state is not None:
+            self.set_enabled(state != 'disabled')
+        if fg is not None:
+            self.label.configure(fg=fg)
+        return result
+
+    config = configure
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
+        cursor = 'hand2' if self.enabled else 'arrow'
+        for widget in (self, self.box, self.label):
+            widget.configure(cursor=cursor)
+        self._draw()
+
+    def _toggle(self, event=None):
+        if not self.enabled:
+            return
+        self.variable.set(not self.variable.get())
+        if self.command:
+            self.command()
+
+    def _on_enter(self, event=None):
+        if self.enabled:
+            self.label.configure(fg=Theme.ACCENT if self.variable.get() else Theme.TEXT)
+
+    def _on_leave(self, event=None):
+        self._draw()
+
+    def _draw(self):
+        self.box.delete('all')
+        checked = bool(self.variable.get())
+        s = self._box_size
+        if not self.enabled:
+            fill = Theme.BORDER_LIGHT
+            outline = Theme.BORDER
+            fg = Theme.TEXT_MUTED
+        elif checked:
+            fill = Theme.ACCENT
+            outline = Theme.ACCENT
+            fg = Theme.TEXT
+        else:
+            fill = Theme.SURFACE
+            outline = Theme.BORDER
+            fg = Theme.TEXT_SECONDARY
+
+        self.box.create_rectangle(
+            s * 0.11, s * 0.11, s * 0.89, s * 0.89,
+            fill=fill, outline=outline, width=max(2, ui_px(1))
+        )
+        if checked:
+            self.box.create_line(
+                s * 0.29, s * 0.50, s * 0.43, s * 0.64, s * 0.71, s * 0.32,
+                fill='white', width=max(2.5, ui_px(1.3)),
+                capstyle='round', joinstyle='round'
+            )
+        self.label.configure(fg=fg)
+
+
+class ProcessingTaskList(tk.Frame):
+    """运行时任务清单，按进度把已完成项置灰并划线。"""
+
+    ICON_SIZE = 34
+
+    TASKS = {
+        'smart': [
+            (6, "读取输入文档"),
+            (22, "修复标点与空格"),
+            (86, "应用格式规范"),
+            (100, "保存输出文件"),
+        ],
+        'analyze': [
+            (20, "读取输入文档"),
+            (80, "诊断格式问题"),
+            (100, "生成诊断结果"),
+        ],
+        'punctuation': [
+            (20, "读取输入文档"),
+            (82, "修复标点与空格"),
+            (100, "保存输出文件"),
+        ],
+        'format': [
+            (20, "读取输入文档"),
+            (86, "应用格式规范"),
+            (100, "保存输出文件"),
+        ],
+        'normal': [
+            (20, "读取输入文档"),
+            (80, "处理文档内容"),
+            (100, "保存输出文件"),
+        ],
+    }
+
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, bg=Theme.BG, **kwargs)
+        self.rows = []
+        self.thresholds = []
+
+    def _get_tasks(self, mode, has_input_conversion=False, has_output_conversion=False):
+        tasks = list(self.TASKS.get(mode, self.TASKS['normal']))
+
+        if has_input_conversion:
+            tasks.insert(0, (4, "转换为 DOCX 工作稿"))
+
+        if has_output_conversion:
+            final_task = tasks[-1] if tasks else (100, "保存输出文件")
+            tasks = tasks[:-1] + [(96, "转换输出格式"), final_task]
+
+        return tasks
+
+    def start(self, mode, has_input_conversion=False, has_output_conversion=False):
+        tasks = self._get_tasks(
+            mode,
+            has_input_conversion=has_input_conversion,
+            has_output_conversion=has_output_conversion
+        )
+
+        for widget in self.winfo_children():
+            widget.destroy()
+
+        self.rows = []
+        self.thresholds = [threshold for threshold, _text in tasks]
+
+        tk.Label(
+            self,
+            text="任务清单",
+            font=get_font(11, 'bold'),
+            bg=Theme.BG,
+            fg=Theme.TEXT_SECONDARY,
+            anchor='w'
+        ).pack(fill='x', pady=(0, Theme.SPACE_SM))
+
+        for _threshold, text in tasks:
+            row = tk.Frame(self, bg=Theme.BG)
+            row.pack(fill='x', pady=4)
+
+            icon = tk.Canvas(
+                row,
+                width=ui_px(self.ICON_SIZE),
+                height=ui_px(self.ICON_SIZE),
+                bg=Theme.BG,
+                highlightthickness=0
+            )
+            icon.pack(side='left', padx=(0, Theme.SPACE_MD))
+
+            label = tk.Label(
+                row,
+                text=text,
+                font=get_font(10),
+                bg=Theme.BG,
+                fg=Theme.TEXT_SECONDARY,
+                anchor='w'
+            )
+            label.pack(side='left', fill='x', expand=True)
+            self.rows.append((icon, label))
+
+        self.pack(fill='x', pady=(0, Theme.SPACE_MD))
+        self.update_status(0, "准备中...")
+
+    def update_status(self, percent, stage_text=""):
+        if not self.rows:
+            return
+
+        active_index = 0
+        for idx, threshold in enumerate(self.thresholds):
+            if percent >= threshold:
+                active_index = idx + 1
+        active_index = min(active_index, len(self.rows) - 1)
+        if percent >= 100:
+            active_index = len(self.rows)
+
+        for idx, (icon, label) in enumerate(self.rows):
+            icon.delete('all')
+            size = ui_px(self.ICON_SIZE)
+            line_width = max(3, ui_px(2))
+
+            if idx < active_index:
+                icon.create_oval(
+                    size * .10, size * .10, size * .90, size * .90,
+                    fill=Theme.LOG_SUCCESS,
+                    outline=''
+                )
+                icon.create_line(
+                    size * .27, size * .50,
+                    size * .44, size * .67,
+                    size * .74, size * .31,
+                    fill='white',
+                    width=max(4, ui_px(2.2)),
+                    capstyle='round',
+                    joinstyle='round'
+                )
+                label.configure(
+                    fg=Theme.TEXT_MUTED,
+                    font=(Theme.FONT_SERIF[0], 10, 'normal', 'overstrike')
+                )
+            elif idx == active_index:
+                icon.create_oval(
+                    size * .10, size * .10, size * .90, size * .90,
+                    fill=Theme.PRIMARY_LIGHT,
+                    outline=Theme.PRIMARY,
+                    width=line_width
+                )
+                icon.create_oval(
+                    size * .36, size * .36, size * .64, size * .64,
+                    fill=Theme.PRIMARY,
+                    outline=''
+                )
+                label.configure(fg=Theme.TEXT, font=get_font(10, 'bold'))
+            else:
+                icon.create_oval(
+                    size * .14, size * .14, size * .86, size * .86,
+                    fill=Theme.CARD,
+                    outline=Theme.BORDER,
+                    width=line_width
+                )
+                label.configure(fg=Theme.TEXT_SECONDARY, font=get_font(10))
+
+    def stop(self):
+        self.pack_forget()
+
+
 class ResultPanel(tk.Frame):
     """结果反馈面板"""
     
@@ -2830,12 +3467,40 @@ class ResultPanel(tk.Frame):
         self.result_card = tk.Frame(self, bg=Theme.CARD, highlightbackground=Theme.BORDER, highlightthickness=1)
         self.result_content = tk.Frame(self.result_card, bg=Theme.CARD)
         self.result_content.pack(fill='both', expand=True, padx=Theme.SPACE_LG, pady=Theme.SPACE_LG)
+        self._wrapped_labels = []
+        self.bind('<Configure>', self._on_configure)
+        self.result_content.bind('<Configure>', self._on_configure)
+
+    def _wraplength(self):
+        width = self.result_content.winfo_width()
+        if width < 120:
+            width = self.winfo_width()
+        if width < 120:
+            width = self.winfo_toplevel().winfo_width() - 120
+        return max(360, width - 12)
+
+    def _register_wrapped(self, label):
+        self._wrapped_labels.append(label)
+        label.configure(wraplength=self._wraplength())
+        return label
+
+    def _clear_result_content(self):
+        for widget in self.result_content.winfo_children():
+            widget.destroy()
+        self._wrapped_labels = []
+
+    def _on_configure(self, event=None):
+        wrap = self._wraplength()
+        for label in list(getattr(self, '_wrapped_labels', [])):
+            try:
+                label.configure(wraplength=wrap)
+            except tk.TclError:
+                self._wrapped_labels.remove(label)
     
     def show_success(self, message, filepath=None):
         self.placeholder.pack_forget()
         
-        for widget in self.result_content.winfo_children():
-            widget.destroy()
+        self._clear_result_content()
         
         # 成功图标 + 消息
         header = tk.Frame(self.result_content, bg=Theme.CARD)
@@ -2855,22 +3520,22 @@ class ResultPanel(tk.Frame):
         ).pack(side='left', padx=(Theme.SPACE_SM, 0))
         
         if filepath:
-            tk.Label(
+            self._register_wrapped(tk.Label(
                 self.result_content,
                 text=f"输出文件：{filepath}",
                 font=get_font(11),
                 bg=Theme.CARD,
                 fg=Theme.TEXT_SECONDARY,
-                anchor='w'
-            ).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 0))
+                anchor='w',
+                justify='left',
+            )).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 0))
         
         self.result_card.pack(fill='x', pady=(Theme.SPACE_MD, 0))
     
     def show_diagnosis(self, results):
         self.placeholder.pack_forget()
         
-        for widget in self.result_content.winfo_children():
-            widget.destroy()
+        self._clear_result_content()
         
         tk.Label(
             self.result_content,
@@ -2932,184 +3597,9 @@ class ResultPanel(tk.Frame):
         
         self.result_card.pack(fill='x', pady=(Theme.SPACE_MD, 0))
 
-    def show_ai_results(self, ai_result, annotate_stats, output_path, title="AI 逻辑检查报告", extra_message=None):
-        self.placeholder.pack_forget()
-
-        for widget in self.result_content.winfo_children():
-            widget.destroy()
-
-        issues = ai_result.get('issues', [])
-        total_chunks = ai_result.get('total_chunks', 0)
-        failed_chunks = ai_result.get('failed_chunks', 0)
-
-        tk.Label(
-            self.result_content,
-            text=title,
-            font=get_font(15, 'bold'),
-            bg=Theme.CARD,
-            fg=Theme.TEXT,
-            anchor='w'
-        ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_SM))
-
-        if extra_message:
-            tk.Label(
-                self.result_content,
-                text=extra_message,
-                font=get_font(12, 'bold'),
-                bg=Theme.CARD,
-                fg=Theme.TEXT,
-                anchor='w',
-                justify='left',
-                wraplength=620
-            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_SM))
-
-        if annotate_stats.get('inline', 0) > 0:
-            hint = (
-                "AI 检查结果仅供参考，可能有误报或漏报，请务必人工复核。"
-                "可插入批注的段落正文未被修改，问题以批注形式标注；"
-                "部分段落因无法插入批注，已用红色内联提示标注。"
-            )
-        else:
-            hint = (
-                "AI 检查结果仅供参考，可能有误报或漏报，请务必人工复核。"
-                "正文未被修改，问题以批注形式标注。"
-            )
-        tk.Label(
-            self.result_content,
-            text=hint,
-            font=get_font(11),
-            bg=Theme.CARD,
-            fg=Theme.LOG_WARNING,
-            anchor='w',
-            justify='left',
-            wraplength=620
-        ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
-
-        if total_chunks and failed_chunks == total_chunks:
-            tk.Label(
-                self.result_content,
-                text="AI 检查未成功完成（全部分段失败），本次结果不可信，请检查网络后重试",
-                font=get_font(12, 'bold'),
-                bg=Theme.CARD,
-                fg=Theme.LOG_ERROR,
-                anchor='w',
-                justify='left',
-                wraplength=620
-            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
-        elif failed_chunks > 0:
-            tk.Label(
-                self.result_content,
-                text=f"有 {failed_chunks}/{total_chunks} 个分段检查失败，结果可能不完整，请重试",
-                font=get_font(12, 'bold'),
-                bg=Theme.CARD,
-                fg=Theme.LOG_WARNING,
-                anchor='w',
-                justify='left',
-                wraplength=620
-            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
-
-        grouped = {
-            '病句': [],
-            '逻辑': [],
-            '其他': [],
-        }
-        for issue in issues:
-            category = issue.get('category', '其他')
-            if category not in grouped:
-                category = '其他'
-            grouped[category].append(issue)
-
-        total = len(issues)
-        if total == 0 and not (total_chunks and failed_chunks == total_chunks):
-            tk.Label(
-                self.result_content,
-                text="未发现明显病句或逻辑问题",
-                font=get_font(13, 'bold'),
-                bg=Theme.CARD,
-                fg=Theme.LOG_SUCCESS,
-                anchor='w'
-            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
-        elif total == 0:
-            tk.Label(
-                self.result_content,
-                text="未获得可信 AI 检查结果",
-                font=get_font(13, 'bold'),
-                bg=Theme.CARD,
-                fg=Theme.LOG_ERROR,
-                anchor='w'
-            ).pack(fill='x', anchor='w', pady=(0, Theme.SPACE_MD))
-        else:
-            for category in ('病句', '逻辑', '其他'):
-                category_issues = grouped[category]
-                if not category_issues:
-                    continue
-
-                tk.Label(
-                    self.result_content,
-                    text=f"{category}（{len(category_issues)}处）",
-                    font=get_font(12, 'bold'),
-                    bg=Theme.CARD,
-                    fg=Theme.TEXT,
-                    anchor='w'
-                ).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 2))
-
-                for issue in category_issues[:8]:
-                    para = issue.get('para', '?')
-                    message = issue.get('message', '')
-                    tk.Label(
-                        self.result_content,
-                        text=f"第{para}段：{message}",
-                        font=get_font(11),
-                        bg=Theme.CARD,
-                        fg=Theme.TEXT_SECONDARY,
-                        anchor='w',
-                        justify='left',
-                        wraplength=620
-                    ).pack(fill='x', anchor='w', pady=1)
-
-                if len(category_issues) > 8:
-                    tk.Label(
-                        self.result_content,
-                        text=f"……另有 {len(category_issues) - 8} 条，请在 Word 批注中查看",
-                        font=get_font(11),
-                        bg=Theme.CARD,
-                        fg=Theme.TEXT_MUTED,
-                        anchor='w'
-                    ).pack(fill='x', anchor='w', pady=1)
-
-        tk.Frame(self.result_content, bg=Theme.BORDER, height=1).pack(fill='x', pady=Theme.SPACE_MD)
-
-        tk.Label(
-            self.result_content,
-            text=(
-                f"已标注 {annotate_stats.get('annotated', 0)} 条"
-                f"（批注 {annotate_stats.get('comment', 0)} 条，"
-                f"内联 {annotate_stats.get('inline', 0)} 条，"
-                f"跳过 {annotate_stats.get('skipped', 0)} 条）"
-            ),
-            font=get_font(12),
-            bg=Theme.CARD,
-            fg=Theme.TEXT,
-            anchor='w'
-        ).pack(fill='x', anchor='w')
-
-        tk.Label(
-            self.result_content,
-            text=f"输出文件：{output_path}",
-            font=get_font(11),
-            bg=Theme.CARD,
-            fg=Theme.TEXT_SECONDARY,
-            anchor='w',
-            justify='left',
-            wraplength=620
-        ).pack(fill='x', anchor='w', pady=(Theme.SPACE_SM, 0))
-
-        self.result_card.pack(fill='x', pady=(Theme.SPACE_MD, 0))
-    
     def reset(self):
         self.result_card.pack_forget()
-        for widget in self.result_content.winfo_children():
-            widget.destroy()
+        self._clear_result_content()
         self.placeholder.pack()
 
 
@@ -3118,9 +3608,9 @@ class DocFormatApp:
         self.root = root
         self.root.title("公文格式处理工具")
         _init_system_fonts()
-        self.root.geometry("1180x900")
-        self.root.minsize(980, 780)
+        self._set_initial_window_geometry()
         self.root.configure(bg=Theme.BG)
+        self._scrollbar_drag_offset = None
         
         # 变量
         self.input_file = tk.StringVar()
@@ -3133,6 +3623,26 @@ class DocFormatApp:
         
         self.create_widgets()
         self.root._on_file_selected = self._on_file_selected
+
+    def _set_initial_window_geometry(self):
+        """让主窗口默认以更宽的工作区打开，同时兼容小屏和高 DPI。"""
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+        except Exception:
+            screen_w, screen_h = 1366, 768
+
+        width = min(screen_w - 80, max(1120, int(screen_w * 0.72)))
+        height = min(screen_h - 80, max(780, int(screen_h * 0.82)))
+        width = max(980, width)
+        height = max(700, height)
+        width = min(width, max(760, screen_w - 40))
+        height = min(height, max(640, screen_h - 40))
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.minsize(min(960, width), min(700, height))
     
     def create_widgets(self):
         """构建界面"""
@@ -3142,7 +3652,10 @@ class DocFormatApp:
         
         # Canvas + 自定义滚动条
         self.canvas = tk.Canvas(container, bg=Theme.BG, highlightthickness=0)
-        self.scrollbar_canvas = tk.Canvas(container, width=14, bg=Theme.BG, highlightthickness=0)
+        self.scrollbar_canvas = tk.Canvas(
+            container, width=ui_px(20), bg=Theme.BG,
+            highlightthickness=0, cursor='sb_v_double_arrow'
+        )
         
         self.canvas.pack(side='left', fill='both', expand=True)
         self.scrollbar_canvas.pack(side='right', fill='y')
@@ -3152,11 +3665,15 @@ class DocFormatApp:
         self.canvas_window = self.canvas.create_window((0, 0), window=self.main_frame, anchor='nw')
         
         # 绑定滚动
+        self.canvas.configure(yscrollcommand=self._on_canvas_yview)
         self.main_frame.bind('<Configure>', self._on_frame_configure)
         self.canvas.bind('<Configure>', self._on_canvas_configure)
-        self.root.bind_all('<MouseWheel>', self._on_mousewheel)
+        self.root.bind_all('<MouseWheel>', self._on_mousewheel, add='+')
+        self.root.bind_all('<Button-4>', self._on_mousewheel, add='+')
+        self.root.bind_all('<Button-5>', self._on_mousewheel, add='+')
         self.scrollbar_canvas.bind('<Button-1>', self._on_scrollbar_click)
         self.scrollbar_canvas.bind('<B1-Motion>', self._on_scrollbar_drag)
+        self.scrollbar_canvas.bind('<ButtonRelease-1>', self._on_scrollbar_release)
         
         # 内容区域
         content = tk.Frame(self.main_frame, bg=Theme.BG)
@@ -3174,7 +3691,15 @@ class DocFormatApp:
         # ===== 2. 文件选择区 =====
         file_section = tk.Frame(content, bg=Theme.BG)
         file_section.pack(fill='x', pady=(0, Theme.SPACE_LG))
-        placeholder_text = "点击选择文件，或将文件拖到这里" if _DND_AVAILABLE else "点击选择文件"
+        if _DND_AVAILABLE:
+            placeholder_text = "点击选择文件，或将文件拖到这里"
+        elif os.name == 'nt' and _DND_DISABLED_REASON:
+            if "管理员" in _DND_DISABLED_REASON:
+                placeholder_text = "点击选择文件（管理员模式下拖拽不可用）"
+            else:
+                placeholder_text = "点击选择文件（拖拽不可用）"
+        else:
+            placeholder_text = "点击选择文件"
         
         self.input_field = FileInputField(
             file_section,
@@ -3186,7 +3711,7 @@ class DocFormatApp:
         )
         self.input_field.pack(fill='x', pady=(0, Theme.SPACE_SM))
 
-        # v1.8.0: AI 粘贴功能入口
+        # v1.8.0: 粘贴文本生成 docx 入口
         paste_row = tk.Frame(file_section, bg=Theme.BG)
         paste_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
 
@@ -3194,7 +3719,7 @@ class DocFormatApp:
 
         paste_btn = tk.Label(
             paste_row,
-            text="📋 没有文件？粘贴 AI 生成的文本生成 docx",
+            text="📋 没有文件？粘贴文本生成 docx",
             font=get_font(11),
             bg=Theme.BG, fg=Theme.PRIMARY,
             cursor='hand2', anchor='w', padx=4,
@@ -3244,22 +3769,6 @@ class DocFormatApp:
         )
         smart_card.pack(fill='x', pady=(0, Theme.SPACE_MD))
 
-        self.ai_with_format_var = tk.BooleanVar(value=False)
-        if ai_config.is_ai_ui_enabled():
-            self.ai_with_format_cb = tk.Checkbutton(
-                mode_section,
-                text="同时进行 AI 逻辑检查（实验性）",
-                variable=self.ai_with_format_var,
-                font=get_font(11),
-                bg=Theme.BG,
-                fg=Theme.TEXT_SECONDARY,
-                activebackground=Theme.BG,
-                selectcolor=Theme.CARD,
-                cursor='hand2',
-                padx=6,
-            )
-            self.ai_with_format_cb.pack(anchor='w', pady=(0, Theme.SPACE_MD))
-        
         # 两个小卡片
         small_cards = tk.Frame(mode_section, bg=Theme.BG)
         small_cards.pack(fill='x')
@@ -3288,18 +3797,6 @@ class DocFormatApp:
         )
         punct_card.grid(row=0, column=1, sticky='nsew')
 
-        if ai_config.is_ai_ui_enabled():
-            ai_card = SelectableCard(
-                small_cards,
-                title="AI 逻辑检查",
-                description="检查明显病句和逻辑矛盾，并写入 Word 批注",
-                value="ai_check",
-                variable=self.operation,
-                icon_draw_func=Icons.draw_ai,
-                command=self._on_mode_change
-            )
-            ai_card.grid(row=1, column=0, columnspan=2, sticky='nsew', pady=(Theme.SPACE_SM, 0))
-        
         # ===== 4. 格式预设 =====
         preset_section = tk.Frame(content, bg=Theme.BG)
         preset_section.pack(fill='x', pady=(0, Theme.SPACE_LG))
@@ -3340,13 +3837,10 @@ class DocFormatApp:
         revision_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
 
         self.revision_mode_var = tk.BooleanVar(value=False)
-        self.revision_cb = tk.Checkbutton(
+        self.revision_cb = InlineToggle(
             revision_row,
             text="输出修订标记（在 Word 中可逐条接受 / 拒绝格式更改）",
             variable=self.revision_mode_var,
-            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            cursor='hand2', padx=6,
         )
         self.revision_cb.pack(side='left')
         # ⓘ 说明按钮
@@ -3368,14 +3862,12 @@ class DocFormatApp:
         auto_open_row = tk.Frame(content, bg=Theme.BG)
         auto_open_row.pack(fill='x', pady=(0, Theme.SPACE_SM))
         self.auto_open_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
+        self.auto_open_cb = InlineToggle(
             auto_open_row,
             text="处理完成后自动打开输出文件",
             variable=self.auto_open_var,
-            font=get_font(11), bg=Theme.BG, fg=Theme.TEXT_SECONDARY,
-            activebackground=Theme.BG, selectcolor=Theme.CARD,
-            cursor='hand2', padx=6,
-        ).pack(side='left')
+        )
+        self.auto_open_cb.pack(side='left')
 
         
         # ===== 5. 执行按钮 =====
@@ -3398,8 +3890,14 @@ class DocFormatApp:
             widget.bind('<Leave>', lambda e: self._btn_hover(False))
         self.run_label.configure(cursor='hand2')
         
-        # ===== 5.5 进度条 =====
-        self.progress_frame = tk.Frame(content, bg=Theme.BG)
+        # ===== 5.5 运行状态 =====
+        self.status_section = tk.Frame(content, bg=Theme.BG)
+        self.status_section.pack(fill='x', pady=(0, Theme.SPACE_SM))
+
+        self.task_list = ProcessingTaskList(self.status_section)
+        self.processing_panel = ProcessingPanel(self.status_section)
+
+        self.progress_frame = tk.Frame(self.status_section, bg=Theme.BG)
         # 默认不 pack，处理时才显示
         
         self.progress_stage = tk.Label(
@@ -3465,6 +3963,9 @@ class DocFormatApp:
         # 初始化
         self._on_mode_change()
         self.log_panel.log("工具已就绪，请选择文件", 'info')
+        if _DND_DISABLED_REASON:
+            hint = "如需拖拽，请用普通权限启动程序。" if "管理员" in _DND_DISABLED_REASON else "仍可点击选择文件。"
+            self.log_panel.log(f"拖拽提示：{_DND_DISABLED_REASON}。{hint}", 'warning')
     
     def _show_about(self):
         """显示关于对话框"""
@@ -3488,9 +3989,22 @@ class DocFormatApp:
     
     def _show_progress(self):
         """显示进度条"""
-        self.progress_frame.pack(fill='x', pady=(Theme.SPACE_SM, Theme.SPACE_SM),
-                                  before=self.result_panel)
+        self.progress_frame.pack(fill='x', pady=(0, Theme.SPACE_SM))
         self._update_progress(0, 100, '准备中...')
+
+    def _show_processing(self, title=None):
+        """显示运行中的动态状态面板。"""
+        if hasattr(self, 'processing_panel'):
+            self.processing_panel.start(title=title)
+
+    def _show_task_list(self, mode, has_input_conversion=False, has_output_conversion=False):
+        """显示运行任务清单。"""
+        if hasattr(self, 'task_list'):
+            self.task_list.start(
+                mode,
+                has_input_conversion=has_input_conversion,
+                has_output_conversion=has_output_conversion
+            )
     
     def _update_progress(self, current, total, stage_text):
         """更新进度条（线程安全）"""
@@ -3504,10 +4018,18 @@ class DocFormatApp:
         self.progress_bar_fill.place(x=0, y=0, relheight=1.0, relwidth=pct / 100)
         self.progress_stage.configure(text=stage_text)
         self.progress_pct.configure(text=f"{pct}%")
+        if hasattr(self, 'task_list'):
+            self.task_list.update_status(pct, stage_text)
+        if hasattr(self, 'processing_panel') and self.processing_panel.running:
+            self.processing_panel.update_status(pct, stage_text)
     
     def _hide_progress(self):
         """隐藏进度条"""
         self.progress_frame.pack_forget()
+        if hasattr(self, 'processing_panel'):
+            self.processing_panel.stop()
+        if hasattr(self, 'task_list'):
+            self.task_list.stop()
     
     def _on_frame_configure(self, event):
         self.canvas.configure(scrollregion=self.canvas.bbox('all'))
@@ -3516,10 +4038,43 @@ class DocFormatApp:
     def _on_canvas_configure(self, event):
         self.canvas.itemconfig(self.canvas_window, width=event.width)
         self._draw_scrollbar()
+
+    def _on_canvas_yview(self, first, last):
+        self._draw_scrollbar()
+
+    def _can_scroll(self):
+        try:
+            top, bottom = self.canvas.yview()
+            return bottom - top < 0.99
+        except Exception:
+            return False
     
     def _on_mousewheel(self, event):
-        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+        try:
+            if str(event.widget.winfo_toplevel()) != str(self.root):
+                return
+        except Exception:
+            return
+        if not self._can_scroll():
+            return "break"
+
+        if getattr(event, 'num', None) == 4:
+            units = -3
+        elif getattr(event, 'num', None) == 5:
+            units = 3
+        else:
+            delta = getattr(event, 'delta', 0)
+            if delta == 0:
+                units = 0
+            else:
+                units = -int(delta / 120)
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+                units *= 3
+        if units:
+            self.canvas.yview_scroll(units, 'units')
         self._draw_scrollbar()
+        return "break"
     
     def _draw_scrollbar(self):
         """绘制自定义滚动条"""
@@ -3531,42 +4086,79 @@ class DocFormatApp:
             return
         
         if bottom - top >= 0.99:
+            self._scrollbar_thumb = None
             return
         
-        w = 14
+        w = 20
         h = self.scrollbar_canvas.winfo_height()
         
         if h < 10:
             return
         
-        bar_h = max(40, (bottom - top) * h)
-        bar_y = top * (h - bar_h)
+        track_top = 8
+        track_bottom = max(track_top + 24, h - 8)
+        track_h = track_bottom - track_top
+        bar_h = max(44, (bottom - top) * track_h)
+        bar_h = min(bar_h, track_h)
+        bar_y = track_top + top * (track_h - bar_h)
+        self._scrollbar_thumb = (bar_y, bar_h, track_top, track_h)
         
         # 轨道
         self.scrollbar_canvas.create_rectangle(
-            4, 8, w - 4, h - 8,
-            fill='#E8E4DE', outline=''
+            5, track_top, w - 5, track_bottom,
+            fill='#E8E4DE', outline='', tags='track'
         )
         
         # 滑块（更深的颜色）
         self.scrollbar_canvas.create_rectangle(
-            4, bar_y + 8, w - 4, bar_y + bar_h - 8,
-            fill='#A09890', outline=''
+            4, bar_y, w - 4, bar_y + bar_h,
+            fill='#8E867E', outline='', tags='thumb'
         )
     
     def _on_scrollbar_click(self, event):
         """滚动条点击"""
+        if not self._can_scroll():
+            return "break"
         try:
-            h = self.scrollbar_canvas.winfo_height()
-            fraction = event.y / h
-            self.canvas.yview_moveto(fraction)
+            thumb = getattr(self, '_scrollbar_thumb', None)
+            if not thumb:
+                return "break"
+            bar_y, bar_h, _track_top, _track_h = thumb
+            if bar_y <= event.y <= bar_y + bar_h:
+                self._scrollbar_drag_offset = event.y - bar_y
+            else:
+                self._scrollbar_drag_offset = bar_h / 2
+                direction = -1 if event.y < bar_y else 1
+                self.canvas.yview_scroll(direction, 'pages')
             self._draw_scrollbar()
-        except:
-            pass
+        except Exception:
+            return "break"
+        return "break"
     
     def _on_scrollbar_drag(self, event):
         """滚动条拖动"""
-        self._on_scrollbar_click(event)
+        if not self._can_scroll():
+            return "break"
+        try:
+            thumb = getattr(self, '_scrollbar_thumb', None)
+            if not thumb:
+                return "break"
+            bar_y, bar_h, track_top, track_h = thumb
+            offset = self._scrollbar_drag_offset
+            if offset is None:
+                offset = bar_h / 2
+            available = max(1, track_h - bar_h)
+            fraction = (event.y - offset - track_top) / available
+            fraction = max(0.0, min(1.0, fraction))
+            self.canvas.yview_moveto(fraction)
+            self._draw_scrollbar()
+        except Exception:
+            return "break"
+        return "break"
+
+    def _on_scrollbar_release(self, event):
+        self._scrollbar_drag_offset = None
+        return "break"
     
     def _btn_hover(self, is_hover):
         color = Theme.PRIMARY_HOVER if is_hover else Theme.PRIMARY
@@ -3585,13 +4177,6 @@ class DocFormatApp:
             else:
                 self.revision_mode_var.set(False)
                 self.revision_cb.configure(state='disabled', fg=Theme.TEXT_MUTED)
-        if hasattr(self, 'ai_with_format_cb'):
-            ai_enabled = mode == 'smart' and ai_config.is_ai_ui_enabled() and ai_config.is_ai_available()
-            if ai_enabled:
-                self.ai_with_format_cb.configure(state='normal', fg=Theme.TEXT_SECONDARY)
-            else:
-                self.ai_with_format_var.set(False)
-                self.ai_with_format_cb.configure(state='disabled', fg=Theme.TEXT_MUTED)
 
     def _show_revision_info(self, event):
         """弹出修订标记说明小窗"""
@@ -3877,42 +4462,13 @@ class DocFormatApp:
                     )
                     return
 
-        if mode == 'ai_check' and not ai_config.is_ai_ui_enabled():
-            messagebox.showwarning(
-                "实验功能未启用",
-                "AI 检查仍处于实验阶段，v1.8.2 稳定版默认隐藏该入口。"
-            )
-            return
-
-        if mode == 'ai_check' and not ai_config.is_ai_available():
-            cfg_path = ai_config.get_config_file_path()
-            messagebox.showwarning(
-                "AI 服务未配置",
-                f"未配置 AI 服务，暂不可用。\n\n请在以下文件中填写 api_key，或开启 use_fake 测试流程：\n{cfg_path}"
-            )
-            return
-
-        if (
-            mode == 'smart'
-            and getattr(self, 'ai_with_format_var', None) is not None
-            and self.ai_with_format_var.get()
-            and (not ai_config.is_ai_ui_enabled() or not ai_config.is_ai_available())
-        ):
-            cfg_path = ai_config.get_config_file_path()
-            messagebox.showwarning(
-                "AI 服务未配置",
-                f"AI 实验功能未启用或服务未配置，暂不可用。\n\n如需内测，请先启用实验开关并配置：\n{cfg_path}"
-            )
-            return
-
-        if mode not in ('analyze', 'ai_check') and not output_base:
+        if mode != 'analyze' and not output_base:
             messagebox.showerror("提示", "请指定输出文件或目录")
             return
 
-        # 诊断和 AI 检查模式仅支持单文件
-        if mode in ('analyze', 'ai_check') and len(input_paths) > 1:
-            mode_name = "AI 检查" if mode == 'ai_check' else "诊断"
-            messagebox.showwarning("提示", f"{mode_name}模式每次仅处理一个文件，将只分析第一个文件。")
+        # 诊断模式仅支持单文件
+        if mode == 'analyze' and len(input_paths) > 1:
+            messagebox.showwarning("提示", "诊断模式每次仅处理一个文件，将只分析第一个文件。")
             input_paths = input_paths[:1]
 
         self.run_btn.configure(bg=Theme.TEXT_MUTED)
@@ -3920,19 +4476,37 @@ class DocFormatApp:
         self._show_progress()
 
         rev_mode = self.revision_mode_var.get() if hasattr(self, 'revision_mode_var') else False
-        ai_with_format = (
-            mode == 'smart'
-            and ai_config.is_ai_ui_enabled()
-            and hasattr(self, 'ai_with_format_var')
-            and self.ai_with_format_var.get()
+        if mode == 'analyze':
+            processing_title = "正在诊断文档"
+        elif mode == 'punctuation':
+            processing_title = "正在修复标点"
+        elif mode == 'format':
+            processing_title = "正在应用格式"
+        else:
+            processing_title = "正在处理文档"
+        self._show_processing(title=processing_title)
+
+        legacy_exts = ('.doc', '.wps')
+        has_input_conversion = any(Path(p).suffix.lower() in legacy_exts for p in input_paths)
+        if mode == 'analyze':
+            has_output_conversion = False
+        elif len(input_paths) > 1 or os.path.isdir(output_base):
+            has_output_conversion = has_input_conversion
+        else:
+            has_output_conversion = Path(output_base).suffix.lower() in legacy_exts
+
+        self._show_task_list(
+            mode,
+            has_input_conversion=has_input_conversion,
+            has_output_conversion=has_output_conversion
         )
         thread = threading.Thread(
             target=self._do_operation,
-            args=(input_paths, output_base, mode, rev_mode, ai_with_format)
+            args=(input_paths, output_base, mode, rev_mode)
         )
         thread.start()
     
-    def _do_operation(self, input_paths, output_base, mode, revision_mode=False, ai_with_format=False):
+    def _do_operation(self, input_paths, output_base, mode, revision_mode=False):
         """批量调度器：循环处理每个文件，汇总结果。"""
         total = len(input_paths)
         success_paths = []
@@ -3969,7 +4543,6 @@ class DocFormatApp:
                     actual_out, summary = self._process_single_file(
                         input_path, out_path, mode, progress_fn,
                         revision_mode=revision_mode,
-                        ai_with_format=ai_with_format
                     )
                     success_paths.append(actual_out)
                     self.log_panel.log(
@@ -3981,20 +4554,12 @@ class DocFormatApp:
 
             self._update_progress(100, 100, '完成')
 
-            if mode in ('analyze', 'ai_check') or (mode == 'smart' and ai_with_format):
+            if mode == 'analyze':
                 if failed_files:
                     name, err = failed_files[0]
                     self.root.after(0, lambda n=name, e=err: messagebox.showerror(
                         "处理失败", f"{n}\n\n{e}"
                     ))
-                elif mode == 'smart' and ai_with_format and success_paths:
-                    fp = success_paths[0]
-                    self.root.after(0, lambda p=fp: messagebox.showinfo(
-                        "完成", f"文件已保存至:\n{p}"
-                    ))
-                    if self.auto_open_var.get():
-                        self.root.after(100, lambda p=fp: _open_file(p))
-                    self.log_panel.log("全部完成", 'success')
             elif failed_files:
                 summary = "\n".join(f"  • {n}: {e}" for n, e in failed_files)
                 self.log_panel.log(
@@ -4044,7 +4609,7 @@ class DocFormatApp:
                     pass
                 self._pending_temp_input = None
 
-    def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False, ai_with_format=False):
+    def _process_single_file(self, input_path, output_path, mode, progress_fn, revision_mode=False):
         """
         处理单个文件。
         progress_fn(pct: int, text: str) 由调用方传入，负责映射到全局进度条。
@@ -4053,11 +4618,6 @@ class DocFormatApp:
         """
         temp_docx = None
         temp_output_docx = None
-        original_input_path = input_path
-        ai_panel_result = None
-        ai_panel_stats = None
-        ai_panel_extra = None
-        ai_panel_error = None
 
         # 确定空格处理模式
         preset_name = self.preset.get() if hasattr(self, 'preset') else 'official'
@@ -4088,10 +4648,6 @@ class DocFormatApp:
                 input_path = temp_docx
                 self.log_panel.log("转换成功", 'success')
 
-            if mode == 'ai_check':
-                original = Path(original_input_path)
-                output_path = str(original.with_name(f"{original.stem}_AI批注.docx"))
-
             output_ext = Path(output_path).suffix.lower()
             needs_convert_back = output_ext in ('.doc', '.wps')
             if needs_convert_back:
@@ -4115,45 +4671,6 @@ class DocFormatApp:
                 self.root.after(0, lambda: self.result_panel.show_diagnosis(results))
                 self.log_panel.log("诊断完成", 'success')
 
-            elif mode == 'ai_check':
-                progress_fn(5, '正在读取文档...')
-                doc = Document(input_path)
-
-                class _AILogHandler(logging.Handler):
-                    def emit(handler_self, record):
-                        self.log_panel.log(handler_self.format(record), 'warning')
-
-                ai_logger = logging.getLogger('docformat.ai_checker')
-                handler = _AILogHandler()
-                handler.setFormatter(logging.Formatter('%(message)s'))
-                ai_logger.addHandler(handler)
-                ai_logger.setLevel(logging.INFO)
-
-                try:
-                    def ai_progress(pct, text):
-                        progress_fn(5 + int(pct * 70 / 100), text)
-
-                    self.log_panel.log("正在进行 AI 逻辑检查...", 'info')
-                    ai_result = ai_check_document(doc, progress_fn=ai_progress)
-                    issues = ai_result["issues"]
-
-                    progress_fn(80, '正在写入 Word 批注...')
-                    annotate_stats = ai_annotate_document(doc, issues)
-                    doc.save(output_path_docx)
-
-                    progress_fn(100, 'AI 检查完成')
-                    self.root.after(
-                        0,
-                        lambda result=ai_result, stats=annotate_stats, out=output_path_docx:
-                            self.result_panel.show_ai_results(result, stats, out)
-                    )
-                    self.log_panel.log(
-                        f"AI 检查完成，发现 {len(issues)} 条，已保存: {Path(output_path_docx).name}",
-                        'success'
-                    )
-                finally:
-                    ai_logger.removeHandler(handler)
-
             elif mode == 'punctuation':
                 progress_fn(10, '修复标点...')
                 self._run_punctuation(input_path, output_path_docx, space_mode=space_mode)
@@ -4170,76 +4687,11 @@ class DocFormatApp:
                 progress_fn(5, '步骤 2/2: 应用格式...')
 
                 def scaled_progress(pct, total, text):
-                    if ai_with_format:
-                        progress_fn(5 + int(pct * 65 / 100), text)
-                    else:
-                        progress_fn(5 + int(pct * 90 / 100), text)
+                    progress_fn(5 + int(pct * 90 / 100), text)
                 para_stats = self._run_format(temp_path, output_path_docx,
                                  progress_callback=scaled_progress,
                                  revision_mode=revision_mode)
                 os.unlink(temp_path)
-
-                if ai_with_format:
-                    if needs_convert_back:
-                        self.log_panel.log("提示：批注仅在 .docx 中保留，转换为 .doc/.wps 后可能丢失批注。", 'warning')
-
-                    try:
-                        self.log_panel.log("步骤 3/3: AI 逻辑检查并写入批注...", 'info')
-                        progress_fn(70, '步骤 3/3: 读取排版后的文档...')
-                        formatted_doc = Document(output_path_docx)
-
-                        class _AILogHandler(logging.Handler):
-                            def emit(handler_self, record):
-                                self.log_panel.log(handler_self.format(record), 'warning')
-
-                        ai_logger = logging.getLogger('docformat.ai_checker')
-                        handler = _AILogHandler()
-                        handler.setFormatter(logging.Formatter('%(message)s'))
-                        ai_logger.addHandler(handler)
-                        ai_logger.setLevel(logging.INFO)
-
-                        try:
-                            def smart_ai_progress(pct, text):
-                                progress_fn(70 + int(pct * 22 / 100), text)
-
-                            ai_result = ai_check_document(formatted_doc, progress_fn=smart_ai_progress)
-                            issues = ai_result["issues"]
-
-                            progress_fn(92, '正在写入 AI 批注...')
-                            annotate_stats = ai_annotate_document(formatted_doc, issues)
-                            formatted_doc.save(output_path_docx)
-                            progress_fn(100, '格式处理和 AI 检查完成')
-
-                            if ai_result["total_chunks"] and ai_result["failed_chunks"] == ai_result["total_chunks"]:
-                                extra_message = "排版已完成，但 AI 检查未成功完成，未写入可信批注。"
-                            elif annotate_stats.get("annotated", 0) > 0:
-                                extra_message = "该文件已完成格式处理并已标注 AI 批注。"
-                            else:
-                                extra_message = "该文件已完成格式处理；AI 未发现可标注问题。"
-
-                            ai_panel_result = ai_result
-                            ai_panel_stats = annotate_stats
-                            ai_panel_extra = extra_message
-
-                            if ai_result["total_chunks"] and ai_result["failed_chunks"] == ai_result["total_chunks"]:
-                                self.log_panel.log(
-                                    "排版已完成，但 AI 检查全部分段失败，请检查网络后重试。",
-                                    'error'
-                                )
-                            else:
-                                self.log_panel.log(
-                                    f"格式处理完成，AI 发现 {len(issues)} 条，已标注到同一输出文件。",
-                                    'success'
-                                )
-                        finally:
-                            ai_logger.removeHandler(handler)
-                    except Exception as e:
-                        progress_fn(100, '格式处理完成，AI 检查失败')
-                        self.log_panel.log(
-                            f"排版已完成，但 AI 检查失败，已保留排版文件: {e}",
-                            'error'
-                        )
-                        ai_panel_error = str(e)
 
             if mode != 'analyze' and needs_convert_back:
                 from scripts.converter import convert_from_docx
@@ -4273,24 +4725,6 @@ class DocFormatApp:
                             os.unlink(output_path_docx)
                         except Exception:
                             pass
-
-            if mode == 'smart' and ai_with_format:
-                if ai_panel_result is not None:
-                    self.root.after(
-                        0,
-                        lambda result=ai_panel_result, stats=ai_panel_stats, out=output_path, msg=ai_panel_extra:
-                            self.result_panel.show_ai_results(
-                                result,
-                                stats,
-                                out,
-                                title="智能处理 + AI 逻辑检查报告",
-                                extra_message=msg
-                            )
-                    )
-                elif ai_panel_error is not None:
-                    self.root.after(0, lambda out=output_path, err=ai_panel_error: self.result_panel.show_success(
-                        "排版已完成，AI 检查失败", f"{Path(out).name}\nAI 错误：{err}"
-                    ))
 
             return output_path, None
 
@@ -4397,11 +4831,7 @@ class DocFormatApp:
 
 def main():
     global _DND_AVAILABLE
-    try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
-    except:
-        pass
+    _enable_windows_high_dpi()
     
     if _DND_AVAILABLE:
         try:
@@ -4416,6 +4846,7 @@ def main():
         if getattr(sys, 'frozen', False) and sys.platform == 'darwin':
             print("[信息] macOS 打包版当前默认关闭拖拽功能，以优先保证应用可正常启动。")
         root = tk.Tk()
+    _configure_tk_high_dpi(root)
     app = DocFormatApp(root)
     root.mainloop()
 

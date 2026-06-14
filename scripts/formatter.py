@@ -137,6 +137,15 @@ MACOS_FONT_FALLBACK = {
     '华文中宋': 'STZhongsong',
 }
 
+# macOS 上有些用户手动安装的公文字体，字体族名并不是标准的 GB2312，
+# 例如可能显示为“仿宋_GB32312 / 楷体_GB32312”。这些字体比系统华文字体
+# 更接近公文要求，因此在回退到 STFangsong/STKaiti 前优先使用它们。
+MACOS_FONT_ALIASES = {
+    '仿宋_GB2312': ['仿宋_GB2312', '仿宋_GB32312', '仿宋', 'FangSong_GB2312', 'FangSong'],
+    '楷体_GB2312': ['楷体_GB2312', '楷体_GB32312', '楷体', 'KaiTi_GB2312', 'KaiTi'],
+    '方正仿宋_GBK': ['方正仿宋_GBK', '仿宋_GB2312', '仿宋_GB32312', '仿宋', 'FangSong_GB2312', 'FangSong'],
+}
+
 # macOS 已安装字体缓存（启动时检测一次）
 _macos_installed_fonts = None
 _macos_font_detection_done = False
@@ -228,6 +237,11 @@ def _resolve_font_for_macos(font_name):
         logger.debug(f"字体 '{font_name}' 已安装，直接使用")
         return font_name
 
+    for alias in MACOS_FONT_ALIASES.get(font_name, []):
+        if alias in installed:
+            logger.info(f"字体 '{font_name}' 未安装，使用兼容字体 '{alias}'")
+            return alias
+
     fallback = MACOS_FONT_FALLBACK[font_name]
     logger.info(f"字体 '{font_name}' 未安装，回退到 '{fallback}'")
     return fallback
@@ -297,6 +311,13 @@ PRESETS = {
     'official': {
         'name': '公文格式',
         'deep_clean': False,
+        'page_number': True,
+        'page_number_font': '宋体',
+        'page_number_size': 14,
+        'page_number_style': 'dash',
+        'page_number_position': 'outside',
+        'page_number_offset_mm': 7,
+        'replace_existing_page_number': True,
         'page': {'top': 3.7, 'bottom': 3.5, 'left': 2.8, 'right': 2.6},
         # 主标题：二号方正小标宋简体，居中
         'title': {
@@ -1191,7 +1212,7 @@ def _force_normal_style(para):
 def deep_clean_document(doc):
     """深度清洗文档：移除所有段落级用户格式属性，保留文字和结构。
 
-    v1.8.0: 处理 AI 粘贴的脏数据时，原文带的颜色、字号、缩进、段前段后
+    v1.8.0: 处理复制粘贴的脏数据时，原文带的颜色、字号、缩进、段前段后
     等用户级格式会干扰 detect_para_type 的启发式判断。本函数把这些
     属性全部清掉，让后续格式化工作在干净的输入上展开。
 
@@ -1495,96 +1516,165 @@ def format_paragraph(para, fmt, para_type, line_spacing_pt=28, first_line_bold=F
         _add_ppr_change(para, orig_ppr)
 
 
-def add_page_number(doc, font_name="宋体", footer_distance=0.7):
-    """添加页码（四号宋体，左右一字线，奇右偶左，距版心下边缘约7mm）"""
-    # 检测文档是否已有页码——如有则跳过，避免产生两套页码
-    def _footer_has_content(footer):
-        """判断页脚是否已有实质内容（非空段落或含域代码）"""
+def add_page_number(
+    doc,
+    font_name="宋体",
+    font_size=14,
+    style="dash",
+    position="outside",
+    offset_from_text_mm=7,
+    replace_existing=True,
+):
+    """按自定义样式添加页码。
+
+    offset_from_text_mm 表示页码位于版心下边缘以下的距离，不是距纸张底边。
+    对标准公文下边距 35mm，偏移 7mm 对应 Word 页脚距底边约 28mm。
+    """
+    def _footer_state(footer):
+        """返回 (是否有内容, 是否包含 PAGE 页码域)。"""
+        has_content = False
+        has_page_field = False
         for para in footer.paragraphs:
-            if para.text.strip():
-                return True
-            # 检测是否含有域代码（PAGE 域）
+            paragraph_text = para.text.strip()
+            if paragraph_text:
+                has_content = True
+                if re.fullmatch(
+                    r"[—\-–\s　]*(?:第\s*)?\d+(?:\s*/\s*\d+)?(?:\s*页)?[—\-–\s　]*",
+                    paragraph_text,
+                ):
+                    has_page_field = True
             for run in para.runs:
-                if run._r.xml and ('fldChar' in run._r.xml or 'instrText' in run._r.xml):
-                    return True
-        return False
+                xml = run._r.xml or ""
+                if 'fldChar' in xml or 'instrText' in xml:
+                    has_content = True
+                if re.search(r"\bPAGE\b", xml, re.I):
+                    has_page_field = True
+        return has_content, has_page_field
 
     for section in doc.sections:
-        odd_footer = section.footer
-        even_footer = section.even_page_footer
-        if _footer_has_content(odd_footer) or _footer_has_content(even_footer):
-            return   # 已有页码，跳过整个函数
+        states = (
+            _footer_state(section.footer),
+            _footer_state(section.even_page_footer),
+            _footer_state(section.first_page_footer),
+        )
+        has_non_page_content = any(has_content and not has_page for has_content, has_page in states)
+        has_existing_page = any(has_page for _has_content, has_page in states)
+        if has_non_page_content:
+            logger.warning("页脚含有非页码内容，为避免覆盖已跳过页码重设")
+            return
+        if has_existing_page and not replace_existing:
+            return
 
     # 启用奇偶页页眉页脚（文档级）
+    use_even_footer = position == "outside"
     try:
-        doc.settings.odd_and_even_pages_header_footer = True
+        doc.settings.odd_and_even_pages_header_footer = use_even_footer
     except Exception:
         settings_el = doc.settings._element
-        if settings_el.find(qn('w:evenAndOddHeaders')) is None:
+        even_odd = settings_el.find(qn('w:evenAndOddHeaders'))
+        if use_even_footer and even_odd is None:
             settings_el.append(OxmlElement('w:evenAndOddHeaders'))
+        elif not use_even_footer and even_odd is not None:
+            settings_el.remove(even_odd)
 
     for section in doc.sections:
-
-        section.odd_and_even_pages_header_footer = True
-        section.footer_distance = Cm(footer_distance)
+        section.odd_and_even_pages_header_footer = use_even_footer
+        bottom_margin_cm = section.bottom_margin.cm if section.bottom_margin else 3.5
+        footer_distance_cm = max(0.3, bottom_margin_cm - float(offset_from_text_mm) / 10)
+        section.footer_distance = Cm(footer_distance_cm)
 
         odd_footer = section.footer
         even_footer = section.even_page_footer
+        first_footer = section.first_page_footer
         odd_footer.is_linked_to_previous = False
         even_footer.is_linked_to_previous = False
+        first_footer.is_linked_to_previous = False
 
-        for f in (odd_footer, even_footer):
+        for f in (odd_footer, even_footer, first_footer):
             for para in f.paragraphs:
                 para.clear()
 
-        def _build_footer_line(footer, align, pad_fullwidth):
+        def _add_field(paragraph, instruction):
+            begin_run = paragraph.add_run()
+            begin = OxmlElement('w:fldChar')
+            begin.set(qn('w:fldCharType'), 'begin')
+            begin_run._r.append(begin)
+            set_font(begin_run, font_name, font_name, font_size, bold=False)
+
+            instruction_run = paragraph.add_run()
+            instruction_text = OxmlElement('w:instrText')
+            instruction_text.set(qn('xml:space'), 'preserve')
+            instruction_text.text = instruction
+            instruction_run._r.append(instruction_text)
+            set_font(instruction_run, font_name, font_name, font_size, bold=False)
+
+            end_run = paragraph.add_run()
+            end = OxmlElement('w:fldChar')
+            end.set(qn('w:fldCharType'), 'end')
+            end_run._r.append(end)
+            set_font(end_run, font_name, font_name, font_size, bold=False)
+
+        def _build_footer_line(footer, align, leading_space=False, trailing_space=False):
             if footer.paragraphs:
                 para = footer.paragraphs[0]
             else:
                 para = footer.add_paragraph()
 
             para.alignment = align
+            para.paragraph_format.left_indent = None
+            para.paragraph_format.right_indent = None
+            para.paragraph_format.first_line_indent = None
+            para.paragraph_format.space_before = Pt(0)
+            para.paragraph_format.space_after = Pt(0)
 
-            # 前导全角空格（空一字）
-            if pad_fullwidth:
+            if leading_space:
                 run0 = para.add_run("　")
-                set_font(run0, font_name, font_name, 14, bold=False)
+                set_font(run0, font_name, font_name, font_size, bold=False)
 
-            # 左一字线（带空格）
-            run1 = para.add_run("— ")
-            set_font(run1, font_name, font_name, 14, bold=False)
+            if style == "dash":
+                run = para.add_run("— ")
+                set_font(run, font_name, font_name, font_size, bold=False)
+                _add_field(para, " PAGE ")
+                run = para.add_run(" —")
+                set_font(run, font_name, font_name, font_size, bold=False)
+            elif style == "page_text":
+                run = para.add_run("第 ")
+                set_font(run, font_name, font_name, font_size, bold=False)
+                _add_field(para, " PAGE ")
+                run = para.add_run(" 页")
+                set_font(run, font_name, font_name, font_size, bold=False)
+            elif style == "page_total":
+                _add_field(para, " PAGE ")
+                run = para.add_run(" / ")
+                set_font(run, font_name, font_name, font_size, bold=False)
+                _add_field(para, " NUMPAGES ")
+            else:
+                _add_field(para, " PAGE ")
 
-            # 页码域
-            run2 = para.add_run()
-            fldChar1 = OxmlElement('w:fldChar')
-            fldChar1.set(qn('w:fldCharType'), 'begin')
-            run2._r.append(fldChar1)
-            set_font(run2, font_name, font_name, 14, bold=False)
-
-            run3 = para.add_run()
-            instrText = OxmlElement('w:instrText')
-            instrText.text = 'PAGE'
-            run3._r.append(instrText)
-            set_font(run3, font_name, font_name, 14, bold=False)
-
-            run4 = para.add_run()
-            fldChar2 = OxmlElement('w:fldChar')
-            fldChar2.set(qn('w:fldCharType'), 'end')
-            run4._r.append(fldChar2)
-            set_font(run4, font_name, font_name, 14, bold=False)
-
-            # 右一字线（带空格）
-            run5 = para.add_run(" —")
-            set_font(run5, font_name, font_name, 14, bold=False)
-
-            # 末尾全角空格（空一字）
-            if not pad_fullwidth:
+            if trailing_space:
                 run6 = para.add_run("　")
-                set_font(run6, font_name, font_name, 14, bold=False)
+                set_font(run6, font_name, font_name, font_size, bold=False)
 
-        # 奇数页居右空一字，偶数页居左空一字
-        _build_footer_line(odd_footer, WD_ALIGN_PARAGRAPH.RIGHT, pad_fullwidth=True)
-        _build_footer_line(even_footer, WD_ALIGN_PARAGRAPH.LEFT, pad_fullwidth=False)
+        if position == "outside":
+            # 奇数页居右，空格在右；偶数页居左，空格在左。
+            _build_footer_line(
+                odd_footer, WD_ALIGN_PARAGRAPH.RIGHT, trailing_space=True
+            )
+            _build_footer_line(
+                even_footer, WD_ALIGN_PARAGRAPH.LEFT, leading_space=True
+            )
+            if section.different_first_page_header_footer:
+                _build_footer_line(
+                    first_footer, WD_ALIGN_PARAGRAPH.RIGHT, trailing_space=True
+                )
+        else:
+            align = {
+                "left": WD_ALIGN_PARAGRAPH.LEFT,
+                "right": WD_ALIGN_PARAGRAPH.RIGHT,
+            }.get(position, WD_ALIGN_PARAGRAPH.CENTER)
+            _build_footer_line(odd_footer, align)
+            if section.different_first_page_header_footer:
+                _build_footer_line(first_footer, align)
 
 
 def format_document(input_path, output_path, preset_name='official', progress_callback=None, revision_mode=False, bold_serial=True, custom_settings=None):
@@ -1904,8 +1994,15 @@ def format_document(input_path, output_path, preset_name='official', progress_ca
     _progress(78, 100, '添加页码...')
     if preset.get('page_number', True):
         logger.info('5. Adding page numbers...')
-        add_page_number(doc, font_name=preset.get('page_number_font', '宋体'),
-                        footer_distance=preset.get('footer_distance', 0.7))
+        add_page_number(
+            doc,
+            font_name=preset.get('page_number_font', '宋体'),
+            font_size=preset.get('page_number_size', 14),
+            style=preset.get('page_number_style', 'dash'),
+            position=preset.get('page_number_position', 'outside'),
+            offset_from_text_mm=preset.get('page_number_offset_mm', 7),
+            replace_existing=preset.get('replace_existing_page_number', True),
+        )
     else:
         logger.info('5. Skipping page numbers...')
     

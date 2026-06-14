@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import sys
 import shutil
 import subprocess
@@ -15,18 +16,33 @@ from pathlib import Path
 # 配置
 APP_NAME = "公文格式处理工具"
 APP_NAME_EN = "DocFormatter"
-VERSION = "1.0.0"
+VERSION = "1.8.5"
 MAIN_SCRIPT = "docformat_gui.py"
 
 # 输出目录
 DIST_DIR = Path("dist")
 BUILD_DIR = Path("build")
+ASSETS_DIR = Path("assets")
+WINDOWS_ICON = ASSETS_DIR / "icon.ico"
+MACOS_ICON = ASSETS_DIR / "icon.icns"
 
 # macOS 签名 / 公证配置（通过环境变量提供；本地开发可不设，会自动退回 ad-hoc 签名）
 #   MACOS_SIGN_IDENTITY   —— "Developer ID Application: Your Name (TEAMID)" 或其证书指纹
 #   MACOS_NOTARY_PROFILE  —— 预先用 notarytool store-credentials 存好的 keychain profile 名
 #   （或改用 MACOS_NOTARY_APPLE_ID / MACOS_NOTARY_TEAM_ID / MACOS_NOTARY_PASSWORD 三件套）
-MACOS_ENTITLEMENTS = Path("packaging/macos/entitlements.plist")
+MACOS_ENTITLEMENTS_CANDIDATES = [
+    Path("packaging/macos/entitlements.plist"),
+    Path("entitlements.plist"),
+]
+MACOS_REQUIRE_NOTARIZATION = os.environ.get("MACOS_REQUIRE_NOTARIZATION", "").strip() == "1"
+
+
+def _get_macos_entitlements_path():
+    """返回 macOS 签名用 entitlements 文件路径。"""
+    for path in MACOS_ENTITLEMENTS_CANDIDATES:
+        if path.exists():
+            return path
+    return MACOS_ENTITLEMENTS_CANDIDATES[0]
 
 
 def check_pyinstaller():
@@ -39,6 +55,15 @@ def check_pyinstaller():
         print("✗ PyInstaller 未安装")
         print("  请运行: pip install pyinstaller")
         return False
+
+
+def _add_pyinstaller_icon(cmd, icon_path):
+    """如果图标文件存在，将其加入 PyInstaller 参数。"""
+    icon = Path(icon_path)
+    if icon.exists():
+        cmd[-1:-1] = [f"--icon={icon}"]
+    else:
+        print(f"  [提示] 未找到图标文件，跳过应用图标: {icon}")
 
 
 def clean():
@@ -124,7 +149,7 @@ def _codesign_macos(app_path):
 
     返回 True 表示使用了可公证的真实签名。
     """
-    identity = os.environ.get("MACOS_SIGN_IDENTITY", "").strip()
+    identity = _find_macos_sign_identity()
     if not identity:
         print("  [提示] 未设置 MACOS_SIGN_IDENTITY，使用 ad-hoc 签名（不会通过公证）")
         result = subprocess.run(
@@ -143,17 +168,44 @@ def _codesign_macos(app_path):
         "--sign", identity,
         str(app_path),
     ]
-    if MACOS_ENTITLEMENTS.exists():
+    entitlements_path = _get_macos_entitlements_path()
+    if entitlements_path.exists():
         # PyInstaller 的 Python 程序在 hardened runtime 下需要 entitlements，否则运行时崩溃
-        cmd[1:1] = ["--entitlements", str(MACOS_ENTITLEMENTS)]
+        cmd[1:1] = ["--entitlements", str(entitlements_path)]
     else:
-        print(f"  [警告] 找不到 entitlements 文件: {MACOS_ENTITLEMENTS}，公证后可能无法运行")
+        print(f"  [警告] 找不到 entitlements 文件: {entitlements_path}，公证后可能无法运行")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  [错误] 证书签名失败：{result.stderr.strip() or result.stdout.strip()}")
         return False
     print("  ✓ 证书签名完成（hardened runtime + timestamp）")
     return True
+
+
+def _find_macos_sign_identity():
+    """返回 Developer ID Application 签名身份；未显式配置时尝试从钥匙串自动识别。"""
+    identity = os.environ.get("MACOS_SIGN_IDENTITY", "").strip()
+    if identity:
+        return identity
+    if sys.platform != "darwin":
+        return ""
+
+    result = subprocess.run(
+        ["security", "find-identity", "-v", "-p", "codesigning"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return ""
+
+    for line in result.stdout.splitlines():
+        if "Developer ID Application:" not in line:
+            continue
+        match = re.search(r'"([^"]*Developer ID Application:[^"]+)"', line)
+        if match:
+            identity = match.group(1)
+            print(f"  ✓ 自动识别 Developer ID 签名身份: {identity}")
+            return identity
+    return ""
 
 
 def _notarytool_auth_args():
@@ -215,6 +267,52 @@ def _notarize_and_staple(target_path):
     return True
 
 
+def _create_macos_installer_dmg(source_path, dmg_path, volume_name="DocFormatter"):
+    """生成带 Applications 入口的 macOS 安装 DMG。"""
+    source = Path(source_path)
+    dmg = Path(dmg_path)
+    staging_dir = BUILD_DIR / f"dmg_staging_{dmg.stem}"
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if source.is_dir():
+            target = staging_dir / source.name
+            # ditto 更适合复制 .app bundle，可保留 macOS 元数据。
+            copy_result = subprocess.run(
+                ["ditto", str(source), str(target)],
+                capture_output=True, text=True,
+            )
+            if copy_result.returncode != 0:
+                print(f"  [错误] 复制 .app 到 DMG 暂存目录失败：{copy_result.stderr.strip()}")
+                return False
+        else:
+            shutil.copy2(source, staging_dir / source.name)
+
+        applications_link = staging_dir / "Applications"
+        if applications_link.exists() or applications_link.is_symlink():
+            applications_link.unlink()
+        applications_link.symlink_to("/Applications", target_is_directory=True)
+
+        dmg_cmd = [
+            "hdiutil", "create",
+            "-volname", volume_name,
+            "-srcfolder", str(staging_dir),
+            "-ov", "-format", "UDZO",
+            str(dmg),
+        ]
+        print("  正在生成 DMG（含 Applications 拖拽入口）...")
+        dmg_result = subprocess.run(dmg_cmd, capture_output=True, text=True)
+        if dmg_result.returncode != 0:
+            print(f"  [错误] DMG 生成失败：{dmg_result.stderr.strip() or dmg_result.stdout.strip()}")
+            return False
+        return dmg.exists()
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
 def build_windows():
     """构建 Windows 版本"""
     print("\n" + "=" * 50)
@@ -242,6 +340,7 @@ def build_windows():
         MAIN_SCRIPT
     ]
     cmd[-1:-1] = dnd_args
+    _add_pyinstaller_icon(cmd, WINDOWS_ICON)
     
     print(f"运行: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=False)
@@ -309,7 +408,9 @@ def build_macos():
     
     machine = platform.machine().lower()
     is_apple_silicon = any(token in machine for token in ("arm64", "aarch64"))
-    output_name = "docformat_macos_apple_silicon" if is_apple_silicon else "docformat_macos_intel"
+    output_name = os.environ.get("MACOS_OUTPUT_NAME", "").strip()
+    if not output_name:
+        output_name = "docformat_macos_apple_silicon" if is_apple_silicon else "docformat_macos_intel"
     
     # 获取 docx 模板路径
     docx_tpl = _get_docx_templates_path()
@@ -331,6 +432,7 @@ def build_macos():
         "--hidden-import=lxml",
         MAIN_SCRIPT
     ]
+    _add_pyinstaller_icon(cmd, MACOS_ICON)
     
     print(f"运行: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=False)
@@ -347,28 +449,24 @@ def build_macos():
 
             # 1) 签名（有证书则启用 hardened runtime，可公证；否则 ad-hoc）
             real_signed = _codesign_macos(app_path)
+            if MACOS_REQUIRE_NOTARIZATION and not real_signed:
+                print("  [错误] 当前构建要求 macOS 公证，但没有可用的 Developer ID Application 签名身份")
+                return False
 
             # 2) 若为真实签名，先公证并钉票据到 .app 本身
-            if real_signed:
-                _notarize_and_staple(app_path)
+            if real_signed and not _notarize_and_staple(app_path) and MACOS_REQUIRE_NOTARIZATION:
+                return False
 
             # 3) 生成 DMG（此时里面装的是已签名/已公证的 .app）
             dmg_path = DIST_DIR / f"{output_name}.dmg"
-            dmg_cmd = [
-                "hdiutil", "create",
-                "-volname", "DocFormatter",
-                "-srcfolder", str(app_path),
-                "-ov", "-format", "UDZO",
-                str(dmg_path)
-            ]
-            print(f"  正在生成 DMG...")
-            dmg_result = subprocess.run(dmg_cmd, capture_output=True)
-            if dmg_result.returncode == 0 and dmg_path.exists():
+            if _create_macos_installer_dmg(app_path, dmg_path):
                 size_mb = dmg_path.stat().st_size / (1024 * 1024)
                 print(f"  DMG: {dmg_path} ({size_mb:.1f} MB)")
                 # 4) DMG 容器本身也要公证 + 钉票据，用户从网上下载双击才不被拦
-                if real_signed:
-                    _notarize_and_staple(dmg_path)
+                if real_signed and not _notarize_and_staple(dmg_path) and MACOS_REQUIRE_NOTARIZATION:
+                    return False
+            else:
+                return False
             return True
         elif bin_path.exists():
             size_mb = bin_path.stat().st_size / (1024 * 1024)
