@@ -13,10 +13,24 @@ import platform
 import plistlib
 from pathlib import Path
 
+
+def _configure_console_encoding():
+    """Keep GitHub Windows runners from failing on Chinese build logs."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_console_encoding()
+
 # 配置
 APP_NAME = "公文格式处理工具"
 APP_NAME_EN = "DocFormatter"
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 MAIN_SCRIPT = "docformat_gui.py"
 MACOS_APP_BUNDLE_NAME = os.environ.get("MACOS_APP_BUNDLE_NAME", "公文格式处理助手").strip()
 

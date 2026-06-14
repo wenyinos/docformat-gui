@@ -5,6 +5,10 @@ permissions:
   contents: write
 # ==============================
 
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
 on:
   push:
     tags:
