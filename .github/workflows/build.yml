@@ -210,7 +210,7 @@ jobs:
             export MACOS_REQUIRE_NOTARIZATION=0
             echo "::warning::Notarization secrets are incomplete; building a signed but non-notarized macOS DMG."
           fi
-          python build.py macos
+          python -u build.py macos
         env:
           MACOS_OUTPUT_NAME: ${{ matrix.output_name }}
 

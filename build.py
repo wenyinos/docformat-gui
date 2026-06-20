@@ -45,11 +45,13 @@ MACOS_ICON = ASSETS_DIR / "icon.icns"
 #   MACOS_SIGN_IDENTITY   —— "Developer ID Application: Your Name (TEAMID)" 或其证书指纹
 #   MACOS_NOTARY_PROFILE  —— 预先用 notarytool store-credentials 存好的 keychain profile 名
 #   （或改用 MACOS_NOTARY_APPLE_ID / MACOS_NOTARY_TEAM_ID / MACOS_NOTARY_PASSWORD 三件套）
+#   MACOS_NOTARIZE_APP    —— 设为 1 时额外公证 .app；默认只公证最终 .dmg，构建更快
 MACOS_ENTITLEMENTS_CANDIDATES = [
     Path("packaging/macos/entitlements.plist"),
     Path("entitlements.plist"),
 ]
 MACOS_REQUIRE_NOTARIZATION = os.environ.get("MACOS_REQUIRE_NOTARIZATION", "").strip() == "1"
+MACOS_NOTARIZE_APP = os.environ.get("MACOS_NOTARIZE_APP", "").strip() == "1"
 
 
 def _get_macos_entitlements_path():
@@ -474,16 +476,21 @@ def build_macos():
                 print("  [错误] 当前构建要求 macOS 公证，但没有可用的 Developer ID Application 签名身份")
                 return False
 
-            # 2) 若为真实签名，先公证并钉票据到 .app 本身
-            if real_signed and not _notarize_and_staple(app_path) and MACOS_REQUIRE_NOTARIZATION:
-                return False
+            # 2) 默认跳过 .app 单独公证，只公证最终 .dmg，避免每个架构等待两次 Apple。
+            #    若需要最严格的本地 .app 票据，可设置 MACOS_NOTARIZE_APP=1。
+            if real_signed and MACOS_REQUIRE_NOTARIZATION:
+                if MACOS_NOTARIZE_APP:
+                    if not _notarize_and_staple(app_path):
+                        return False
+                else:
+                    print("  [提示] 跳过 .app 单独公证，只公证最终 DMG（设置 MACOS_NOTARIZE_APP=1 可恢复）")
 
-            # 3) 生成 DMG（此时里面装的是已签名/已公证的 .app）
+            # 3) 生成 DMG（此时里面装的是已签名的 .app）
             dmg_path = DIST_DIR / f"{output_name}.dmg"
             if _create_macos_installer_dmg(app_path, dmg_path, app_bundle_name=MACOS_APP_BUNDLE_NAME):
                 size_mb = dmg_path.stat().st_size / (1024 * 1024)
                 print(f"  DMG: {dmg_path} ({size_mb:.1f} MB)")
-                # 4) DMG 容器本身也要公证 + 钉票据，用户从网上下载双击才不被拦
+                # 4) DMG 容器本身公证 + 钉票据，用户从网上下载双击才不被拦
                 if real_signed and not _notarize_and_staple(dmg_path) and MACOS_REQUIRE_NOTARIZATION:
                     return False
             else:
