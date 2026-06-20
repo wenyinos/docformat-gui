@@ -7,10 +7,12 @@
 import os
 import re
 import sys
+import json
 import shutil
 import subprocess
 import platform
 import plistlib
+import time
 from pathlib import Path
 
 
@@ -52,6 +54,8 @@ MACOS_ENTITLEMENTS_CANDIDATES = [
 ]
 MACOS_REQUIRE_NOTARIZATION = os.environ.get("MACOS_REQUIRE_NOTARIZATION", "").strip() == "1"
 MACOS_NOTARIZE_APP = os.environ.get("MACOS_NOTARIZE_APP", "").strip() == "1"
+MACOS_NOTARY_WAIT_TIMEOUT = os.environ.get("MACOS_NOTARY_WAIT_TIMEOUT", "15m").strip() or "15m"
+MACOS_NOTARY_WAIT_RETRIES = int(os.environ.get("MACOS_NOTARY_WAIT_RETRIES", "4") or "4")
 
 
 def _get_macos_entitlements_path():
@@ -239,6 +243,106 @@ def _notarytool_auth_args():
     return None
 
 
+def _notary_json(text):
+    """Best-effort JSON parser for notarytool output."""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _notary_submission_id(*texts):
+    """Extract a notary submission UUID from JSON or fallback text."""
+    for text in texts:
+        data = _notary_json(text)
+        submission_id = data.get("id") if isinstance(data, dict) else None
+        if submission_id:
+            return submission_id
+    pattern = re.compile(
+        r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    )
+    for text in texts:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _notary_status(*texts):
+    """Extract notary status from JSON or plain notarytool text."""
+    for text in texts:
+        data = _notary_json(text)
+        status = data.get("status") if isinstance(data, dict) else None
+        if status:
+            return str(status)
+    for text in texts:
+        match = re.search(r"status:\s*([A-Za-z]+)", text or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _wait_for_notary_submission(submission_id, auth):
+    """Wait for an existing notary submission, retrying transient network failures."""
+    for attempt in range(1, MACOS_NOTARY_WAIT_RETRIES + 1):
+        print(f"  等待 Apple 公证结果（第 {attempt}/{MACOS_NOTARY_WAIT_RETRIES} 次）: {submission_id}")
+        wait = subprocess.run(
+            [
+                "xcrun", "notarytool", "wait", submission_id,
+                "--timeout", MACOS_NOTARY_WAIT_TIMEOUT,
+                "--output-format", "json",
+            ] + auth,
+            capture_output=True, text=True,
+        )
+        wait_stdout = wait.stdout.strip()
+        wait_stderr = wait.stderr.strip()
+        if wait_stdout:
+            print(wait_stdout)
+        if wait_stderr:
+            print(wait_stderr)
+
+        status = _notary_status(wait_stdout, wait_stderr)
+        if wait.returncode == 0 and status == "Accepted":
+            return True
+        if status in {"Invalid", "Rejected"}:
+            print(f"  [错误] Apple 公证拒绝：{status}")
+            return False
+
+        if attempt < MACOS_NOTARY_WAIT_RETRIES:
+            delay = min(120, 20 * attempt)
+            print(f"  [警告] 等待公证结果失败或超时，{delay} 秒后重试。")
+            time.sleep(delay)
+            continue
+
+        detail = wait_stderr or wait_stdout or f"notarytool wait exited with code {wait.returncode}"
+        print(f"  [错误] 公证等待失败：{detail}")
+        return False
+    return False
+
+
+def _staple_with_retry(target):
+    """Staple notarization ticket, retrying short-lived Apple/CDN failures."""
+    for attempt in range(1, 4):
+        staple = subprocess.run(
+            ["xcrun", "stapler", "staple", str(target)],
+            capture_output=True, text=True,
+        )
+        if staple.returncode == 0:
+            print(f"  ✓ 公证 + 钉票据完成: {target.name}")
+            return True
+        detail = staple.stderr.strip() or staple.stdout.strip()
+        if attempt < 3:
+            print(f"  [警告] 钉票据失败，准备重试：{detail}")
+            time.sleep(10 * attempt)
+            continue
+        print(f"  [错误] 钉票据失败：{detail}")
+        return False
+    return False
+
+
 def _notarize_and_staple(target_path):
     """把 target_path（.app 或 .dmg）提交公证并钉上票据。返回 True 表示成功。"""
     auth = _notarytool_auth_args()
@@ -261,28 +365,30 @@ def _notarize_and_staple(target_path):
             return False
         submit_path = tmp_zip
 
-    print(f"  正在提交公证（等待 Apple 返回，可能需要几分钟）: {target.name}")
+    print(f"  正在提交公证: {target.name}")
     submit = subprocess.run(
-        ["xcrun", "notarytool", "submit", str(submit_path), "--wait"] + auth,
+        ["xcrun", "notarytool", "submit", str(submit_path), "--output-format", "json"] + auth,
         capture_output=True, text=True,
     )
     if tmp_zip is not None:
         tmp_zip.unlink(missing_ok=True)
-    print(submit.stdout.strip())
-    if submit.returncode != 0 or "status: Accepted" not in submit.stdout:
-        print(f"  [错误] 公证未通过：{submit.stderr.strip() or submit.stdout.strip()}")
+    submit_stdout = submit.stdout.strip()
+    submit_stderr = submit.stderr.strip()
+    if submit_stdout:
+        print(submit_stdout)
+    if submit_stderr:
+        print(submit_stderr)
+
+    submission_id = _notary_submission_id(submit_stdout, submit_stderr)
+    if submit.returncode != 0 or not submission_id:
+        print(f"  [错误] 公证提交失败：{submit_stderr or submit_stdout}")
+        return False
+
+    if not _wait_for_notary_submission(submission_id, auth):
         return False
 
     # 钉票据：必须钉在原始的 .app / .dmg 上（不是提交用的 zip）
-    staple = subprocess.run(
-        ["xcrun", "stapler", "staple", str(target)],
-        capture_output=True, text=True,
-    )
-    if staple.returncode != 0:
-        print(f"  [错误] 钉票据失败：{staple.stderr.strip() or staple.stdout.strip()}")
-        return False
-    print(f"  ✓ 公证 + 钉票据完成: {target.name}")
-    return True
+    return _staple_with_retry(target)
 
 
 def _create_macos_installer_dmg(source_path, dmg_path, volume_name="DocFormatter", app_bundle_name=None):
