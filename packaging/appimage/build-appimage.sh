@@ -62,7 +62,9 @@ if ! command -v appimagetool >/dev/null 2>&1; then
   wget -q -O appimagetool \
     "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH_VAL}.AppImage"
   chmod +x appimagetool
-  APPIMAGETOOL="./appimagetool"
+  # CI 容器无 FUSE，直接解压执行
+  ./appimagetool --appimage-extract >/dev/null 2>&1
+  APPIMAGETOOL="./squashfs-root/AppRun"
 else
   APPIMAGETOOL="appimagetool"
 fi
@@ -73,6 +75,7 @@ ARCH="$(uname -m)" $APPIMAGETOOL "$APPDIR" "$OUTPUT"
 
 rm -rf "$APPDIR"
 [ -f appimagetool ] && rm -f appimagetool
+[ -d squashfs-root ] && rm -rf squashfs-root
 
 if [ -f "$OUTPUT" ]; then
   SIZE_MB=$(du -m "$OUTPUT" | cut -f1)
