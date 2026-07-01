@@ -31,6 +31,7 @@ cp "$BINARY" "$APPDIR/usr/bin/docformat_linux"
 chmod 755 "$APPDIR/usr/bin/docformat_linux"
 
 [ -f "$ICON" ] && cp "$ICON" "$APPDIR/usr/share/icons/hicolor/256x256/apps/docformat.png"
+[ -f "$ICON" ] && cp "$ICON" "$APPDIR/docformat.png"
 
 # ── .desktop ──
 cat > "$APPDIR/docformat.desktop" <<'EOF'
